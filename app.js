@@ -104,8 +104,8 @@ function pantallaCambioPass(obligatorio) {
 /* ---------------------------------------------------------------- estructura */
 const MENU = [
   ['inicio', 'Inicio'], ['viajes', 'Viajes'], ['facturas', 'Facturas'], ['rutas', 'Rutas y tarifas'],
-  ['clientes', 'Clientes'], ['empresa', 'Empresa'],
-  ['flota', 'Flota', 1], ['conductores', 'Conductores', 1], ['gastos', 'Gastos', 1], ['gestoria', 'Gestoría', 1]
+  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Conductores'], ['gastos', 'Gastos'],
+  ['gestoria', 'Gestoría'], ['empresa', 'Empresa']
 ];
 
 async function pintar() {
@@ -127,7 +127,8 @@ async function pintar() {
     </nav>
     <main class="contenido" id="pagina"><div class="cargando">Cargando…</div></main>
   </div>`;
-  const PAG = { inicio: pInicio, viajes: pViajes, facturas: pFacturas, factura: pFactura, rutas: pRutas, clientes: pClientes, empresa: pEmpresa };
+  const PAG = { inicio: pInicio, viajes: pViajes, facturas: pFacturas, factura: pFactura, rutas: pRutas, clientes: pClientes, empresa: pEmpresa,
+    flota: pFlota, conductores: pConductores, gastos: pGastos, gestoria: pGestoria };
   try { await (PAG[pag] || pProximamente)(id, pag); }
   catch (e) { console.error(e); $('#pagina').innerHTML = `<div class="tarjeta error">Error al cargar: ${esc(traducirError(e))}</div>`; }
 }
@@ -560,27 +561,31 @@ async function imprimirFactura(id) {
     q(db().from('facturas').select('*').eq('id', id).single()),
     q(db().from('factura_lineas').select('*').eq('factura_id', id).order('orden'))
   ]);
+  ventana.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${f.estado === 'borrador' ? 'Prefactura' : 'Factura ' + f.codigo}</title>
+  <style>body{margin:30px}@media print{.np{display:none}}</style></head><body>
+  <p class="np"><button onclick="print()">Imprimir / Guardar PDF</button></p>${htmlFactura(f, lineas)}</body></html>`);
+  ventana.document.close();
+}
+// HTML de la factura (se usa para imprimir y para generar los PDF del paquete de la gestoría)
+function htmlFactura(f, lineas) {
   const e = S.empresa || {}; const c = S.clientes.find((x) => x.id === f.cliente_id) || {};
   const borr = f.estado === 'borrador';
   const dir = (x) => [x.direccion, [x.cp, x.poblacion].filter(Boolean).join(' '), x.provincia].filter(Boolean).map(esc).join('<br>');
-  ventana.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${borr ? 'Prefactura' : 'Factura ' + f.codigo}</title>
-  <style>body{font-family:Arial,sans-serif;font-size:12px;color:#222;margin:30px}h1{color:#1f4e79;font-size:24px;margin:0}table{width:100%;border-collapse:collapse;margin-top:20px}
-  th{background:#1f4e79;color:#fff;padding:6px;text-align:left;font-size:11px}td{padding:5px 6px;border-bottom:1px solid #ddd}.n{text-align:right;white-space:nowrap}
-  .cab{display:flex;justify-content:space-between;gap:30px}.caja{border:1px solid #ccc;padding:10px;border-radius:4px;min-width:250px}.tot{width:280px;margin-left:auto;margin-top:12px}
-  .tot td{border:0}.tot tr:last-child td{font-weight:bold;font-size:15px;border-top:2px solid #222}.pie{margin-top:30px;font-size:11px;color:#555}
-  .marca{position:fixed;top:40%;left:15%;font-size:80px;color:rgba(200,0,0,.12);transform:rotate(-25deg)}@media print{.np{display:none}}</style></head><body>
+  return `<div class="fx"><style>.fx{font-family:Arial,sans-serif;font-size:12px;color:#222;position:relative}.fx h1{color:#1f4e79;font-size:22px;margin:0}
+  .fx table{width:100%;border-collapse:collapse;margin-top:18px}.fx th{background:#1f4e79;color:#fff;padding:6px;text-align:left;font-size:11px}
+  .fx td{padding:5px 6px;border-bottom:1px solid #ddd}.fx .n{text-align:right;white-space:nowrap}.fx .cab{display:flex;justify-content:space-between;gap:30px}
+  .fx .caja{border:1px solid #ccc;padding:10px;border-radius:4px;max-width:340px}.fx .tot{width:280px;margin-left:auto;margin-top:12px}
+  .fx .tot td{border:0}.fx .tot tr:last-child td{font-weight:bold;font-size:15px;border-top:2px solid #222}.fx .pie{margin-top:30px;font-size:11px;color:#555}
+  .fx .marca{position:absolute;top:220px;left:12%;font-size:80px;color:rgba(200,0,0,.12);transform:rotate(-25deg)}</style>
   ${borr ? '<div class="marca">BORRADOR</div>' : ''}
-  <p class="np"><button onclick="print()">Imprimir / Guardar PDF</button></p>
   <div class="cab"><div><h1>${esc(e.razon_social || 'Datos de empresa sin rellenar')}</h1>CIF: ${esc(e.cif)}<br>${dir(e)}<br>${esc(e.telefono || '')} ${esc(e.email || '')}</div>
   <div style="text-align:right"><h1>${borr ? 'PREFACTURA' : 'FACTURA'}</h1><b>${borr ? 'Sin número' : 'Nº ' + f.codigo}</b><br>Fecha: ${fecha(f.fecha) || '—'}<br>${f.vencimiento ? 'Vencimiento: ' + fecha(f.vencimiento) : ''}</div></div>
-  <div class="caja" style="margin-top:20px"><b>Cliente</b><br>${esc(c.nombre)}<br>CIF: ${esc(c.cif)}<br>${dir(c)}</div>
+  <div class="caja" style="margin-top:18px"><b>Cliente</b><br>${esc(c.nombre)}<br>CIF: ${esc(c.cif)}<br>${dir(c)}</div>
   ${f.periodo_desde ? `<p>Servicios de transporte del ${fecha(f.periodo_desde)} al ${fecha(f.periodo_hasta)}</p>` : ''}
   <table><tr><th>Concepto</th><th class="n">Cant.</th><th class="n">Precio</th><th class="n">Importe</th></tr>
   ${lineas.map((l) => `<tr><td>${esc(l.concepto)}</td><td class="n">${num(l.cantidad)}</td><td class="n">${eur(l.precio)}</td><td class="n">${eur(l.importe)}</td></tr>`).join('')}</table>
   <table class="tot"><tr><td>Base imponible</td><td class="n">${eur(f.base)}</td></tr><tr><td>IVA ${num(f.iva_pct, 0)} %</td><td class="n">${eur(f.iva)}</td></tr><tr><td>TOTAL</td><td class="n">${eur(f.total)}</td></tr></table>
-  <div class="pie">Forma de pago: ${esc(c.forma_pago || 'Transferencia')}${e.iban ? ' · IBAN: ' + esc(e.iban) : ''}</div>
-  </body></html>`);
-  ventana.document.close();
+  <div class="pie">Forma de pago: ${esc(c.forma_pago || 'Transferencia')}${e.iban ? ' · IBAN: ' + esc(e.iban) : ''}</div></div>`;
 }
 
 /* ---------------------------------------------------------------- EMPRESA */
@@ -606,15 +611,440 @@ async function guardarEmpresa() {
   await recargarMaestros(); aviso('Datos de la empresa guardados');
 }
 
-/* ---------------------------------------------------------------- PRÓXIMAMENTE */
-function pProximamente(_id, pag) {
-  const txt = {
-    flota: 'Camiones y remolques con sus vencimientos (ITV, seguro, tacógrafo, ATP) y avisos.',
-    conductores: 'Ficha de cada conductor, documentos con caducidad (carné, CAP, tarjeta), dietas, anticipos, horas y vacaciones.',
-    gastos: 'Facturas de proveedores con foto/PDF y lectura automática: gasoil, peajes, talleres… y coste por camión.',
-    gestoria: 'Paquete mensual para la gestoría: ZIP con todas las facturas + Excel resumen + resumen de nóminas.'
-  }[pag] || 'Esta página no existe.';
-  $('#pagina').innerHTML = `<h1>${esc((MENU.find((m) => m[0] === pag) || [, 'Página'])[1])}</h1><div class="tarjeta"><p>Módulo en preparación.</p><p class="ayuda">${esc(txt)}</p></div>`;
+function pProximamente() { $('#pagina').innerHTML = '<h1>Página no encontrada</h1><p><a href="#inicio">Volver al inicio</a></p>'; }
+
+/* ---------------------------------------------------------------- ARCHIVOS (fotos / PDF) */
+const BUCKET = 'erp-documentos';
+async function subirArchivo(inputId, carpeta) {
+  const inp = document.getElementById(inputId);
+  const file = inp?.files?.[0];
+  if (!file) return null;
+  if (file.size > 10 * 1024 * 1024) { aviso('El archivo pesa más de 10 MB', true); throw new Error('grande'); }
+  const limpio = file.name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.\-]+/g, '_').slice(-80);
+  const ruta = `${carpeta}/${Date.now()}_${limpio}`;
+  await q(sb.storage.from(BUCKET).upload(ruta, file, { contentType: file.type || undefined }));
+  return ruta;
 }
+async function verArchivo(ruta) {
+  const w = window.open('', '_blank');
+  const d = await q(sb.storage.from(BUCKET).createSignedUrl(ruta, 600));
+  w.location = d.signedUrl;
+}
+const enlaceArchivo = (ruta) => (ruta ? `<a href="javascript:void 0" onclick="event.stopPropagation();verArchivo('${esc(ruta)}')">📎 Ver</a>` : '');
+const campoArchivo = (id, actual) => `<div><label>Foto o PDF ${actual ? '(ya tiene: ' + enlaceArchivo(actual) + ')' : ''}</label><input type="file" id="${id}" accept="application/pdf,image/*"></div>`;
+
+function estadoFecha(d) {
+  if (!d) return et('gris', 'Sin datos');
+  const dias = Math.round((new Date(d + 'T12:00:00') - new Date(hoy() + 'T12:00:00')) / 86400000);
+  const margen = S.empresa?.dias_aviso_vencimientos ?? 30;
+  if (dias < 0) return et('rojo', 'Caducado ' + fecha(d));
+  if (dias <= margen) return et('ambar', 'Vence ' + fecha(d));
+  return et('verde', fecha(d));
+}
+function cargarScript(url) {
+  cargarScript.c = cargarScript.c || {};
+  return (cargarScript.c[url] = cargarScript.c[url] || new Promise((ok, ko) => {
+    const s = document.createElement('script'); s.src = url; s.onload = ok; s.onerror = () => ko(new Error('No se pudo cargar ' + url)); document.head.appendChild(s);
+  }));
+}
+const mesTexto = (m) => new Date(m + '-15T12:00:00').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+
+/* ---------------------------------------------------------------- FLOTA */
+const TIPOS_VEH = { tractora: 'Tractora', rigido: 'Camión rígido', semirremolque: 'Semirremolque', remolque: 'Remolque', furgoneta: 'Furgoneta' };
+const TIPOS_VENC = { itv: 'ITV', seguro: 'Seguro', tacografo: 'Tacógrafo', atp: 'ATP (frigorífico)', revision: 'Revisión / mantenimiento', tarjeta_transporte: 'Tarjeta de transporte', extintores: 'Extintores', otro: 'Otro' };
+const fFlota = { ver: 'activos' };
+async function pFlota() {
+  let qy = db().from('v_vehiculos').select('*').order('tipo').order('matricula');
+  qy = fFlota.ver === 'activos' ? qy.is('fecha_baja', null) : qy.not('fecha_baja', 'is', null);
+  const lista = await q(qy);
+  $('#pagina').innerHTML = `
+  <h1>Flota</h1>
+  <div class="barra">
+    <div class="campo"><label>Ver</label><select id="fl-ver"><option value="activos" ${fFlota.ver === 'activos' ? 'selected' : ''}>En servicio</option><option value="bajas" ${fFlota.ver === 'bajas' ? 'selected' : ''}>Dados de baja</option></select></div>
+    <button onclick="editarVehiculo()">+ Nuevo vehículo</button>
+  </div>
+  <div class="tabla-wrap"><table>
+    <tr><th>Matrícula</th><th>Tipo</th><th>Marca / modelo</th><th>Frío</th><th>Próximo vencimiento</th></tr>
+    ${lista.map((v) => `<tr class="clic" onclick="editarVehiculo('${v.id}')"><td><b>${esc(v.matricula)}</b></td><td>${TIPOS_VEH[v.tipo] || v.tipo}</td>
+      <td>${esc([v.marca, v.modelo].filter(Boolean).join(' '))}</td><td>${v.frigorifico ? '❄️' : ''}</td>
+      <td>${v.proximo_vencimiento ? (TIPOS_VENC[v.proximo_tipo] || v.proximo_tipo) + ' · ' + estadoFecha(v.proximo_vencimiento) : et('gris', 'Sin vencimientos')}</td></tr>`).join('')}
+  </table>${lista.length ? '' : '<div class="vacio">No hay vehículos. Pulsa «+ Nuevo vehículo».</div>'}</div>`;
+  $('#fl-ver').onchange = (e) => { fFlota.ver = e.target.value; pFlota(); };
+}
+async function editarVehiculo(id) {
+  const v = id ? await q(db().from('vehiculos').select('*').eq('id', id).single()) : { tipo: 'tractora', frigorifico: true, fecha_alta: hoy() };
+  const venc = id ? await q(db().from('vehiculo_vencimientos').select('*').eq('vehiculo_id', id).order('renovado').order('fecha_vencimiento')) : [];
+  const campo = (k, t, tipo = 'text') => `<div><label>${t}</label><input id="ve-${k}" type="${tipo}" value="${esc(v[k])}"></div>`;
+  modal(`<h1>${id ? esc(v.matricula) : 'Nuevo vehículo'}</h1>
+  <div class="rejilla">
+    ${campo('matricula', 'Matrícula')}
+    <div><label>Tipo</label><select id="ve-tipo">${Object.entries(TIPOS_VEH).map(([k, t]) => `<option value="${k}" ${v.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    ${campo('marca', 'Marca')}${campo('modelo', 'Modelo')}${campo('bastidor', 'Nº bastidor')}${campo('fecha_matriculacion', 'Fecha matriculación', 'date')}
+    ${campo('fecha_alta', 'Alta en la empresa', 'date')}${campo('fecha_baja', 'Baja (vendido / retirado)', 'date')}
+    <div><label>Frigorífico</label><input type="checkbox" id="ve-frigorifico" style="width:auto" ${v.frigorifico ? 'checked' : ''}></div>
+  </div>
+  <label>Notas</label><textarea id="ve-notas">${esc(v.notas)}</textarea>
+  <div class="acciones">${id ? `<button class="peligro izq" onclick="borrarVehiculo('${id}')">Borrar</button>` : ''}
+    <button class="sec" onclick="cerrarModal()">Cerrar</button><button onclick="guardarVehiculo(${id ? `'${id}'` : ''})">Guardar</button></div>
+  ${id ? `<h2>Vencimientos</h2>
+  <p class="ayuda">Cuando renueves (nueva ITV, nuevo seguro…) pulsa «Renovar» y pon la nueva fecha: el aviso desaparece y queda el historial.</p>
+  ${tablaVencimientos(venc, TIPOS_VENC, 'vehiculo_vencimientos', `editarVehiculo('${id}')`)}
+  <div class="barra" style="margin-top:12px">
+    <div class="campo"><label>Tipo</label><select id="vv-tipo">${Object.entries(TIPOS_VENC).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Vence el</label><input type="date" id="vv-fecha"></div>
+    <div class="campo"><label>Importe (opcional)</label><input type="number" step="0.01" id="vv-importe"></div>
+    <div class="campo"><label>Nota</label><input id="vv-desc" placeholder="Compañía, nº póliza…"></div>
+    ${campoArchivo('vv-archivo')}
+    <button onclick="anadirVencimiento('${id}')">Añadir</button>
+  </div>` : ''}`);
+}
+function tablaVencimientos(lista, tipos, tabla, recargar) {
+  if (!lista.length) return '<p class="ayuda">Sin vencimientos registrados.</p>';
+  return `<div class="tabla-wrap"><table><tr><th>Tipo</th><th>Nota / nº</th><th>Vence</th><th class="num">Importe</th><th>Doc.</th><th></th></tr>
+  ${lista.map((x) => `<tr style="${x.renovado ? 'opacity:.5' : ''}"><td>${esc(tipos[x.tipo] || x.tipo)}</td><td>${esc(x.descripcion ?? x.numero ?? '')}</td>
+    <td>${x.renovado ? fecha(x.fecha_vencimiento) + ' ' + et('gris', 'Renovado') : estadoFecha(x.fecha_vencimiento)}</td>
+    <td class="num">${x.importe != null ? eur(x.importe) : ''}</td><td>${enlaceArchivo(x.archivo_url)}</td>
+    <td style="white-space:nowrap">${x.renovado ? '' : `<button class="peq" onclick="renovar('${tabla}','${x.id}', ${esc(JSON.stringify(recargar))})">Renovar</button>`}
+      <button class="sec peq" onclick="borrarFila('${tabla}','${x.id}', ${esc(JSON.stringify(recargar))})">Quitar</button></td></tr>`).join('')}
+  </table></div>`;
+}
+async function guardarVehiculo(id) {
+  const reg = {};
+  ['matricula', 'tipo', 'marca', 'modelo', 'bastidor', 'fecha_matriculacion', 'fecha_alta', 'fecha_baja', 'notas'].forEach((k) => (reg[k] = val('ve-' + k)));
+  reg.frigorifico = val('ve-frigorifico');
+  if (!reg.matricula) return aviso('La matrícula es obligatoria', true);
+  reg.matricula = reg.matricula.toUpperCase().replace(/[\s-]+/g, '');
+  if (id) await q(db().from('vehiculos').update(reg).eq('id', id));
+  else id = (await q(db().from('vehiculos').insert(reg).select('id').single())).id;
+  await recargarMaestros(); aviso('Vehículo guardado'); pFlota(); editarVehiculo(id);
+}
+async function borrarVehiculo(id) {
+  if (!confirm('¿Borrar el vehículo? Si ya tiene viajes o gastos, mejor ponle fecha de baja.')) return;
+  await q(db().from('vehiculos').delete().eq('id', id)); cerrarModal(); await recargarMaestros(); pFlota();
+}
+async function anadirVencimiento(vehId) {
+  if (!val('vv-fecha')) return aviso('Pon la fecha de vencimiento', true);
+  const archivo = await subirArchivo('vv-archivo', 'flota/' + vehId);
+  await q(db().from('vehiculo_vencimientos').insert({ vehiculo_id: vehId, tipo: val('vv-tipo'), fecha_vencimiento: val('vv-fecha'), importe: val('vv-importe'), descripcion: val('vv-desc'), archivo_url: archivo }));
+  aviso('Vencimiento añadido'); editarVehiculo(vehId);
+}
+async function renovar(tabla, id, recargar) {
+  const nueva = prompt('Nueva fecha de vencimiento (dd/mm/aaaa):');
+  if (!nueva) return;
+  const m = nueva.trim().match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+  if (!m) return aviso('Escribe la fecha así: 15/03/2027', true);
+  const iso = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  const viejo = await q(db().from(tabla).select('*').eq('id', id).single());
+  const { id: _i, renovado: _r, archivo_url: _a, ...copia } = viejo;
+  await q(db().from(tabla).insert({ ...copia, fecha_vencimiento: iso }));
+  await q(db().from(tabla).update({ renovado: true }).eq('id', id));
+  aviso('Renovado hasta ' + fecha(iso)); eval(recargar);
+}
+async function borrarFila(tabla, id, recargar) {
+  if (!confirm('¿Quitar este registro?')) return;
+  await q(db().from(tabla).delete().eq('id', id)); eval(recargar);
+}
+
+/* ---------------------------------------------------------------- CONDUCTORES */
+const TIPOS_DOC = { carne: 'Carné de conducir', cap: 'CAP', tarjeta_tacografo: 'Tarjeta tacógrafo', reconocimiento_medico: 'Reconocimiento médico', adr: 'ADR', otro: 'Otro' };
+const SUBCOND = {
+  dietas: { titulo: 'Dietas', campos: [['fecha', 'Fecha', 'date'], ['tipo', 'Tipo', ['completa', 'desayuno', 'comida', 'cena', 'pernocta', 'otro']], ['importe', 'Importe €', 'number'], ['notas', 'Notas']], filtro: 'fecha', total: 'importe' },
+  anticipos: { titulo: 'Anticipos', campos: [['fecha', 'Fecha', 'date'], ['importe', 'Importe €', 'number'], ['mes_nomina', 'Se descuenta en', 'month'], ['concepto', 'Concepto']], filtro: 'mes_nomina', total: 'importe' },
+  horas_extra: { titulo: 'Horas extra', campos: [['fecha', 'Fecha', 'date'], ['horas', 'Horas', 'number'], ['notas', 'Notas']], filtro: 'fecha', total: 'horas' },
+  ausencias: { titulo: 'Vacaciones y ausencias', campos: [['tipo', 'Tipo', ['vacaciones', 'permiso', 'baja', 'otro']], ['desde', 'Desde', 'date'], ['hasta', 'Hasta', 'date'], ['notas', 'Notas']], filtro: 'rango' }
+};
+const fCond = { ver: 'activos', mes: hoy().slice(0, 7) };
+async function pConductores() {
+  let qy = db().from('v_conductores').select('*').order('nombre');
+  if (fCond.ver === 'activos') qy = qy.eq('activo', true); else if (fCond.ver === 'inactivos') qy = qy.eq('activo', false);
+  const lista = await q(qy);
+  $('#pagina').innerHTML = `
+  <h1>Conductores</h1>
+  <div class="barra">
+    <div class="campo"><label>Ver</label><select id="co-ver">${[['activos', 'Activos'], ['inactivos', 'De baja'], ['', 'Todos']].map(([k, t]) => `<option value="${k}" ${fCond.ver === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <button class="sec" onclick="sincronizarConductores()">⟳ Traer nuevos de TransControl</button>
+    <button onclick="editarConductor()">+ Conductor</button>
+  </div>
+  <p class="ayuda">Los conductores vienen de TransControl. Aquí se completan su ficha, documentos, dietas, anticipos, horas y vacaciones (lo que se pasa a la gestoría).</p>
+  <div class="tabla-wrap"><table>
+    <tr><th>Conductor</th><th>DNI</th><th>Teléfono</th><th>Documentos</th><th>Próximo vencimiento</th><th>Estado</th></tr>
+    ${lista.map((c) => `<tr class="clic" onclick="editarConductor('${c.id}')"><td><b>${esc(c.nombre)}</b></td><td>${esc(c.dni) || et('ambar', 'Falta')}</td><td>${esc(c.telefono)}</td>
+      <td>${c.num_documentos || et('ambar', 'Ninguno')}</td><td>${c.proximo_vencimiento ? (TIPOS_DOC[c.proximo_tipo] || '') + ' · ' + estadoFecha(c.proximo_vencimiento) : ''}</td>
+      <td>${c.activo ? et('verde', 'Activo') : et('gris', 'Baja')}</td></tr>`).join('')}
+  </table>${lista.length ? '' : '<div class="vacio">No hay conductores.</div>'}</div>`;
+  $('#co-ver').onchange = (e) => { fCond.ver = e.target.value; pConductores(); };
+}
+async function sincronizarConductores() {
+  await q(db().rpc('sincronizar_conductores'));
+  await recargarMaestros(); aviso('Conductores actualizados desde TransControl'); pConductores();
+}
+async function editarConductor(id, pestana = 'ficha') {
+  const c = id ? await q(db().from('conductores').select('*').eq('id', id).single()) : { activo: true };
+  const tabs = id ? [['ficha', 'Ficha'], ['documentos', 'Documentos'], ...Object.entries(SUBCOND).map(([k, x]) => [k, x.titulo])] : [['ficha', 'Ficha']];
+  let cuerpo = '';
+  if (pestana === 'ficha') {
+    const campo = (k, t, tipo = 'text') => `<div><label>${t}</label><input id="cd-${k}" type="${tipo}" value="${esc(c[k])}"></div>`;
+    cuerpo = `<div class="rejilla">${campo('nombre', 'Nombre')}${campo('dni', 'DNI / NIE')}${campo('telefono', 'Teléfono', 'tel')}${campo('email', 'Email', 'email')}
+      ${campo('fecha_alta', 'Fecha de alta', 'date')}${campo('fecha_baja', 'Fecha de baja', 'date')}
+      <div><label>Activo</label><input type="checkbox" id="cd-activo" style="width:auto" ${c.activo ? 'checked' : ''}></div></div>
+      ${c.tc_conductor_id ? '<p class="ayuda">Vinculado a TransControl: el nombre se actualiza desde allí.</p>' : ''}
+      <label>Notas</label><textarea id="cd-notas">${esc(c.notas)}</textarea>
+      <div class="acciones"><button class="sec" onclick="cerrarModal();pConductores()">Cerrar</button><button onclick="guardarConductor(${id ? `'${id}'` : ''})">Guardar ficha</button></div>`;
+  } else if (pestana === 'documentos') {
+    const docs = await q(db().from('conductor_documentos').select('*').eq('conductor_id', id).order('renovado').order('fecha_vencimiento'));
+    cuerpo = `${tablaVencimientos(docs, TIPOS_DOC, 'conductor_documentos', `editarConductor('${id}','documentos')`)}
+    <div class="barra" style="margin-top:12px">
+      <div class="campo"><label>Documento</label><select id="dc-tipo">${Object.entries(TIPOS_DOC).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select></div>
+      <div class="campo"><label>Número</label><input id="dc-numero"></div>
+      <div class="campo"><label>Caduca el</label><input type="date" id="dc-fecha"></div>
+      ${campoArchivo('dc-archivo')}
+      <button onclick="anadirDocumento('${id}')">Añadir</button></div>`;
+  } else {
+    cuerpo = await subtablaConductor(id, pestana);
+  }
+  modal(`<h1>${id ? esc(c.nombre) : 'Nuevo conductor'}</h1>
+  <div class="barra">${tabs.map(([k, t]) => `<button class="${k === pestana ? '' : 'sec'} peq" onclick="editarConductor('${id}','${k}')">${t}</button>`).join('')}</div>
+  ${cuerpo}`);
+}
+async function guardarConductor(id) {
+  const reg = {};
+  ['nombre', 'dni', 'telefono', 'email', 'fecha_alta', 'fecha_baja', 'notas'].forEach((k) => (reg[k] = val('cd-' + k)));
+  reg.activo = val('cd-activo');
+  if (!reg.nombre) return aviso('El nombre es obligatorio', true);
+  if (reg.dni) reg.dni = reg.dni.toUpperCase().replace(/[\s-]/g, '');
+  if (id) await q(db().from('conductores').update(reg).eq('id', id));
+  else id = (await q(db().from('conductores').insert(reg).select('id').single())).id;
+  await recargarMaestros(); aviso('Ficha guardada'); editarConductor(id);
+}
+async function anadirDocumento(condId) {
+  if (!val('dc-fecha')) return aviso('Pon la fecha de caducidad', true);
+  const archivo = await subirArchivo('dc-archivo', 'conductores/' + condId);
+  await q(db().from('conductor_documentos').insert({ conductor_id: condId, tipo: val('dc-tipo'), numero: val('dc-numero'), fecha_vencimiento: val('dc-fecha'), archivo_url: archivo }));
+  aviso('Documento añadido'); editarConductor(condId, 'documentos');
+}
+async function subtablaConductor(id, tabla) {
+  const cfg = SUBCOND[tabla]; const ini = fCond.mes + '-01'; const fin = finMes(ini);
+  let qy = db().from(tabla).select('*').eq('conductor_id', id);
+  if (cfg.filtro === 'rango') qy = qy.lte('desde', fin).gte('hasta', ini).order('desde');
+  else if (cfg.filtro === 'mes_nomina') qy = qy.eq('mes_nomina', ini).order('fecha');
+  else qy = qy.gte(cfg.filtro, ini).lte(cfg.filtro, fin).order(cfg.filtro);
+  const filas = await q(qy);
+  const mostrar = (c, x) => (c[2] === 'date' ? fecha(x[c[0]]) : c[2] === 'month' ? (x[c[0]] ? mesTexto(x[c[0]].slice(0, 7)) : '') : c[2] === 'number' && c[0] === 'importe' ? eur(x[c[0]]) : esc(x[c[0]]));
+  const entrada = (c) => Array.isArray(c[2])
+    ? `<select id="sc-${c[0]}">${c[2].map((o) => `<option>${o}</option>`).join('')}</select>`
+    : `<input id="sc-${c[0]}" type="${c[2] || 'text'}" ${c[2] === 'number' ? 'step="0.01"' : ''} value="${c[2] === 'month' ? fCond.mes : c[2] === 'date' && c[0] !== 'hasta' ? (hoy().startsWith(fCond.mes) ? hoy() : ini) : ''}">`;
+  const total = cfg.total ? filas.reduce((a, x) => a + Number(x[cfg.total] || 0), 0) : null;
+  return `<div class="barra"><div class="campo"><label>Mes</label><input type="month" id="sc-mes" value="${fCond.mes}" onchange="fCond.mes=this.value;editarConductor('${id}','${tabla}')"></div>
+    ${total != null ? `<p style="margin:0 0 8px">Total ${mesTexto(fCond.mes)}: <b>${cfg.total === 'importe' ? eur(total) : num(total) + ' h'}</b></p>` : ''}</div>
+  <div class="tabla-wrap"><table><tr>${cfg.campos.map((c) => `<th>${c[1]}</th>`).join('')}<th></th></tr>
+    ${filas.map((x) => `<tr>${cfg.campos.map((c) => `<td>${mostrar(c, x)}</td>`).join('')}<td><button class="sec peq" onclick="borrarFila('${tabla}','${x.id}', ${esc(JSON.stringify(`editarConductor('${id}','${tabla}')`))})">Quitar</button></td></tr>`).join('')}
+    <tr>${cfg.campos.map((c) => `<td>${entrada(c)}</td>`).join('')}<td><button class="peq" onclick="anadirSub('${id}','${tabla}')">Añadir</button></td></tr>
+  </table></div>`;
+}
+async function anadirSub(id, tabla) {
+  const reg = { conductor_id: id };
+  for (const c of SUBCOND[tabla].campos) {
+    let v = val('sc-' + c[0]);
+    if (c[2] === 'month' && v) v = v + '-01';
+    reg[c[0]] = v;
+  }
+  const faltan = SUBCOND[tabla].campos.filter((c) => !['notas', 'concepto'].includes(c[0]) && reg[c[0]] == null);
+  if (faltan.length) return aviso('Falta: ' + faltan.map((c) => c[1]).join(', '), true);
+  await q(db().from(tabla).insert(reg)); aviso('Añadido'); editarConductor(id, tabla);
+}
+
+/* ---------------------------------------------------------------- GASTOS */
+const CATEGORIAS = { gasoil: 'Gasoil', adblue: 'AdBlue', peajes: 'Peajes', taller: 'Taller', neumaticos: 'Neumáticos', lavado: 'Lavado', seguro: 'Seguro', itv: 'ITV', tacografo: 'Tacógrafo', atp: 'ATP', financiacion_leasing: 'Leasing / financiación', dietas: 'Dietas', gestoria: 'Gestoría', telefonia: 'Telefonía', oficina: 'Oficina', impuestos_tasas: 'Impuestos y tasas', otros: 'Otros' };
+const fGastos = { mes: hoy().slice(0, 7), categoria: '', vehiculo: '' };
+async function pGastos() {
+  const ini = fGastos.mes + '-01'; const fin = finMes(ini);
+  let qy = db().from('gastos').select('*, proveedores(nombre), vehiculos(matricula)').gte('fecha', ini).lte('fecha', fin).order('fecha', { ascending: false });
+  if (fGastos.categoria) qy = qy.eq('categoria', fGastos.categoria);
+  if (fGastos.vehiculo) qy = qy.eq('vehiculo_id', fGastos.vehiculo);
+  const [lista, costes, ingresos] = await Promise.all([
+    q(qy), q(db().from('v_coste_vehiculo_mes').select('*').eq('mes', ini)), q(db().from('v_ingreso_vehiculo_mes').select('*').eq('mes', ini))
+  ]);
+  const porCat = {}; lista.forEach((g) => (porCat[g.categoria] = (porCat[g.categoria] || 0) + Number(g.base)));
+  const tot = (k) => lista.reduce((a, g) => a + Number(g[k] || 0), 0);
+  const mats = [...new Set([...costes.map((c) => c.matricula), ...ingresos.map((c) => c.matricula)])].sort();
+  $('#pagina').innerHTML = `
+  <h1>Gastos</h1>
+  <div class="barra">
+    <div class="campo"><label>Mes</label><input type="month" id="fg-mes" value="${fGastos.mes}"></div>
+    <div class="campo"><label>Categoría</label><select id="fg-categoria"><option value="">Todas</option>${Object.entries(CATEGORIAS).map(([k, t]) => `<option value="${k}" ${fGastos.categoria === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Camión</label><select id="fg-vehiculo">${opciones(S.vehiculos, fGastos.vehiculo, 'Todos', (x) => x.matricula)}</select></div>
+    <button onclick="editarGasto()">+ Nuevo gasto</button>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="t">Gastos ${mesTexto(fGastos.mes)}</div><div class="n">${eur(tot('base'))}</div><div class="t">base · ${lista.length} facturas · IVA ${eur(tot('iva'))}</div></div>
+    ${Object.entries(porCat).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `<div class="kpi"><div class="t">${CATEGORIAS[k]}</div><div class="n">${eur(v)}</div></div>`).join('')}
+  </div>
+  <div class="tabla-wrap"><table>
+    <tr><th>Fecha</th><th>Proveedor</th><th>Nº factura</th><th>Categoría</th><th>Camión</th><th class="num">Base</th><th class="num">IVA</th><th class="num">Total</th><th>Doc.</th><th>Pago</th></tr>
+    ${lista.map((g) => `<tr class="clic" onclick="editarGasto('${g.id}')"><td>${fecha(g.fecha)}</td><td>${esc(g.proveedores?.nombre)}</td><td>${esc(g.num_factura)}</td>
+      <td>${CATEGORIAS[g.categoria]}</td><td>${esc(g.vehiculos?.matricula)}</td><td class="num">${eur(g.base)}</td><td class="num">${eur(g.iva)}</td><td class="num">${eur(g.total)}</td>
+      <td>${g.archivo_url ? enlaceArchivo(g.archivo_url) : et('ambar', 'Falta')}</td><td>${g.pagado ? et('verde', 'Pagado') : et('gris', 'Pendiente')}</td></tr>`).join('')}
+  </table>${lista.length ? '' : '<div class="vacio">No hay gastos este mes.</div>'}</div>
+  ${mats.length ? `<h2>Rentabilidad por camión · ${mesTexto(fGastos.mes)}</h2>
+  <p class="ayuda">Ingresos según tarifas de los viajes con ese camión asignado, menos sus gastos del mes.</p>
+  <div class="tabla-wrap"><table><tr><th>Camión</th><th class="num">Viajes</th><th class="num">Ingresos</th><th class="num">Gasoil</th><th class="num">Litros</th><th class="num">Mantenimiento</th><th class="num">Gastos totales</th><th class="num">Resultado</th></tr>
+  ${mats.map((m) => { const c = costes.find((x) => x.matricula === m) || {}; const i = ingresos.find((x) => x.matricula === m) || {}; const r = Number(i.ingreso_estimado || 0) - Number(c.gasto_total || 0);
+    return `<tr><td><b>${esc(m)}</b></td><td class="num">${i.viajes || 0}</td><td class="num">${eur(i.ingreso_estimado)}</td><td class="num">${eur(c.gasoil)}</td><td class="num">${num(c.litros, 0)}</td>
+    <td class="num">${eur(c.mantenimiento)}</td><td class="num">${eur(c.gasto_total)}</td><td class="num" style="color:${r < 0 ? 'var(--rojo)' : 'var(--verde)'}"><b>${eur(r)}</b></td></tr>`; }).join('')}
+  </table></div>` : ''}`;
+  ['mes', 'categoria', 'vehiculo'].forEach((k) => { $('#fg-' + k).onchange = (e) => { fGastos[k] = e.target.value; pGastos(); }; });
+}
+async function editarGasto(id) {
+  const g = id ? await q(db().from('gastos').select('*, proveedores(nombre,cif)').eq('id', id).single()) : { fecha: hoy(), iva_pct: 21, categoria: 'gasoil', pagado: false };
+  const provs = await q(db().from('proveedores').select('*').order('nombre'));
+  editarGasto.provs = provs;
+  modal(`<h1>${id ? 'Gasto' : 'Nuevo gasto'}</h1>
+  <div class="rejilla">
+    <div><label>Fecha factura</label><input type="date" id="g-fecha" value="${g.fecha}"></div>
+    <div><label>Proveedor</label><input id="g-proveedor" list="l-provs" value="${esc(g.proveedores?.nombre)}" placeholder="Escribe o elige" onchange="proveedorElegido()">
+      <datalist id="l-provs">${provs.map((p) => `<option value="${esc(p.nombre)}">`).join('')}</datalist></div>
+    <div><label>CIF proveedor</label><input id="g-cif" value="${esc(g.proveedores?.cif)}"></div>
+    <div><label>Nº factura</label><input id="g-num" value="${esc(g.num_factura)}"></div>
+    <div><label>Categoría</label><select id="g-categoria">${Object.entries(CATEGORIAS).map(([k, t]) => `<option value="${k}" ${g.categoria === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Camión (si es de uno)</label><select id="g-vehiculo">${opciones(S.vehiculos, g.vehiculo_id, '— general —', (x) => x.matricula)}</select></div>
+    <div><label>Conductor (opcional)</label><select id="g-conductor">${opciones(S.conductores, g.conductor_id, '—')}</select></div>
+    <div><label>Litros (gasoil)</label><input type="number" step="0.01" id="g-litros" value="${g.litros ?? ''}"></div>
+    <div><label>Km del camión</label><input type="number" id="g-km" value="${g.km_vehiculo ?? ''}"></div>
+    <div><label>Base imponible €</label><input type="number" step="0.01" id="g-base" value="${g.base ?? ''}" oninput="calcGasto('base')"></div>
+    <div><label>IVA %</label><select id="g-iva" onchange="calcGasto('base')">${[21, 10, 4, 0].map((x) => `<option ${Number(g.iva_pct) === x ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+    <div><label>Total con IVA €</label><input type="number" step="0.01" id="g-total" value="${g.total ?? ''}" oninput="calcGasto('total')"></div>
+    <div><label>Pagado</label><input type="checkbox" id="g-pagado" style="width:auto" ${g.pagado ? 'checked' : ''}></div>
+    ${campoArchivo('g-archivo', g.archivo_url)}
+  </div>
+  <label>Notas</label><input id="g-notas" value="${esc(g.notas)}">
+  <div class="acciones">${id ? `<button class="peligro izq" onclick="borrarGasto('${id}')">Borrar</button>` : ''}
+    <button class="sec" onclick="cerrarModal()">Cancelar</button><button id="b-gasto" onclick="guardarGasto(${id ? `'${id}'` : ''})">Guardar</button></div>`);
+}
+function proveedorElegido() {
+  const p = editarGasto.provs.find((x) => x.nombre.toLowerCase() === (val('g-proveedor') || '').toLowerCase());
+  if (p) { $('#g-cif').value = p.cif || ''; if (p.categoria_defecto) $('#g-categoria').value = p.categoria_defecto; }
+}
+function calcGasto(desde) {
+  const iva = Number(val('g-iva')) / 100;
+  if (desde === 'base') { const b = Number(val('g-base')); $('#g-total').value = val('g-base') == null ? '' : (b * (1 + iva)).toFixed(2); }
+  else { const t = Number(val('g-total')); $('#g-base').value = val('g-total') == null ? '' : (t / (1 + iva)).toFixed(2); }
+}
+async function guardarGasto(id) {
+  const nombre = val('g-proveedor');
+  if (!val('g-fecha') || val('g-base') == null) return aviso('Fecha e importe son obligatorios', true);
+  $('#b-gasto').disabled = true;
+  try {
+    let provId = null;
+    if (nombre) {
+      const p = editarGasto.provs.find((x) => x.nombre.toLowerCase() === nombre.toLowerCase());
+      if (p) { provId = p.id; if (val('g-cif') && val('g-cif') !== p.cif) await q(db().from('proveedores').update({ cif: val('g-cif') }).eq('id', p.id)); }
+      else provId = (await q(db().from('proveedores').insert({ nombre, cif: val('g-cif'), categoria_defecto: val('g-categoria') }).select('id').single())).id;
+    }
+    const archivo = await subirArchivo('g-archivo', 'gastos/' + val('g-fecha').slice(0, 7));
+    const reg = { fecha: val('g-fecha'), proveedor_id: provId, num_factura: val('g-num'), categoria: val('g-categoria'), vehiculo_id: val('g-vehiculo'),
+      conductor_id: val('g-conductor'), litros: val('g-litros'), km_vehiculo: val('g-km'), base: val('g-base'), iva_pct: Number(val('g-iva')), pagado: val('g-pagado'), notas: val('g-notas') };
+    if (archivo) reg.archivo_url = archivo;
+    if (id) await q(db().from('gastos').update(reg).eq('id', id)); else await q(db().from('gastos').insert(reg));
+    cerrarModal(); aviso('Gasto guardado'); fGastos.mes = reg.fecha.slice(0, 7); pGastos();
+  } catch { const b = $('#b-gasto'); if (b) b.disabled = false; }
+}
+async function borrarGasto(id) { if (!confirm('¿Borrar este gasto?')) return; await q(db().from('gastos').delete().eq('id', id)); cerrarModal(); pGastos(); }
+
+/* ---------------------------------------------------------------- GESTORÍA */
+const fGest = { mes: mesAnterior().slice(0, 7) };
+async function datosGestoria() {
+  const ini = fGest.mes + '-01'; const fin = finMes(ini);
+  const [gastos, facturas, nominas] = await Promise.all([
+    q(db().from('v_gastos_gestoria').select('*').eq('mes', ini).order('fecha')),
+    q(db().from('v_facturas').select('*').eq('estado', 'emitida').gte('fecha', ini).lte('fecha', fin).order('numero')),
+    q(db().from('v_resumen_nomina_mes').select('*').eq('mes', ini).order('conductor'))
+  ]);
+  return { gastos, facturas, nominas };
+}
+async function pGestoria() {
+  const { gastos, facturas, nominas } = await datosGestoria();
+  const sinDoc = gastos.filter((g) => !g.archivo_url).length;
+  const enviados = gastos.filter((g) => g.enviado_gestoria_mes).length;
+  const sum = (l, k) => l.reduce((a, x) => a + Number(x[k] || 0), 0);
+  $('#pagina').innerHTML = `
+  <h1>Gestoría</h1>
+  <div class="barra">
+    <div class="campo"><label>Mes</label><input type="month" id="gs-mes" value="${fGest.mes}"></div>
+    <button class="sec" onclick="descargarExcelGestoria()">⬇ Excel resumen</button>
+    <button id="b-zip" onclick="descargarZipGestoria()">⬇ Paquete completo (ZIP)</button>
+    <button class="sec" onclick="marcarEnviado()">✓ Marcar como enviado</button>
+  </div>
+  <p class="ayuda">El ZIP lleva el Excel + el PDF de cada factura emitida + las fotos/PDF de las facturas de gastos del mes. Es lo que antes escaneabais una a una.</p>
+  ${sinDoc ? `<div class="alerta ambar">${sinDoc} gastos de este mes no tienen la foto/PDF de la factura. <a href="#gastos" style="margin-left:auto">Revisar</a></div>` : ''}
+  ${enviados ? `<div class="alerta ambar" style="background:var(--verde-f)">${enviados} de ${gastos.length} gastos ya marcados como enviados a la gestoría.</div>` : ''}
+  <div class="kpis">
+    <div class="kpi"><div class="t">Facturas emitidas</div><div class="n">${facturas.length}</div><div class="t">Base ${eur(sum(facturas, 'base'))} · IVA ${eur(sum(facturas, 'iva'))}</div></div>
+    <div class="kpi"><div class="t">Facturas de gastos</div><div class="n">${gastos.length}</div><div class="t">Base ${eur(sum(gastos, 'base'))} · IVA ${eur(sum(gastos, 'iva'))}</div></div>
+    <div class="kpi"><div class="t">IVA repercutido − soportado</div><div class="n">${eur(sum(facturas, 'iva') - sum(gastos, 'iva'))}</div><div class="t">orientativo</div></div>
+  </div>
+  <h2>Datos para nóminas · ${mesTexto(fGest.mes)}</h2>
+  <div class="tabla-wrap"><table><tr><th>Conductor</th><th>DNI</th><th class="num">Viajes</th><th class="num">Dietas</th><th class="num">Horas extra</th><th class="num">Anticipos</th><th>Ausencias</th></tr>
+  ${nominas.map((n) => `<tr><td>${esc(n.conductor)}</td><td>${esc(n.dni)}</td><td class="num">${n.viajes}</td><td class="num">${eur(n.dietas)}</td><td class="num">${num(n.horas_extra)}</td><td class="num">${eur(n.anticipos)}</td><td>${esc(n.ausencias)}</td></tr>`).join('')}
+  </table>${nominas.length ? '' : '<div class="vacio">Sin datos de nómina este mes.</div>'}</div>`;
+  $('#gs-mes').onchange = (e) => { fGest.mes = e.target.value; pGestoria(); };
+}
+async function libroExcel(d) {
+  await cargarScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+  const wb = XLSX.utils.book_new();
+  const hoja = (filas, nombre) => { const ws = XLSX.utils.json_to_sheet(filas.length ? filas : [{ '': 'Sin datos' }]); XLSX.utils.book_append_sheet(wb, ws, nombre); };
+  const n2 = (x) => Math.round(Number(x || 0) * 100) / 100;
+  hoja(d.facturas.map((f) => ({ 'Nº factura': f.codigo, Fecha: fecha(f.fecha), Cliente: f.cliente_nombre, CIF: (S.clientes.find((c) => c.id === f.cliente_id) || {}).cif || '', Base: n2(f.base), 'IVA %': n2(f.iva_pct), IVA: n2(f.iva), Total: n2(f.total), Vencimiento: fecha(f.vencimiento), Cobrado: n2(f.cobrado) })), 'Facturas emitidas');
+  hoja(d.gastos.map((g) => ({ Fecha: fecha(g.fecha), Proveedor: g.proveedor || '', CIF: g.cif || '', 'Nº factura': g.num_factura || '', Categoría: CATEGORIAS[g.categoria] || g.categoria, Camión: g.matricula || '', Base: n2(g.base), 'IVA %': n2(g.iva_pct), IVA: n2(g.iva), Total: n2(g.total), 'Con documento': g.archivo_url ? 'Sí' : 'NO' })), 'Facturas recibidas');
+  hoja(d.nominas.map((n) => ({ Conductor: n.conductor, DNI: n.dni || '', Viajes: n.viajes, Dietas: n2(n.dietas), 'Horas extra': n2(n.horas_extra), Anticipos: n2(n.anticipos), Ausencias: n.ausencias || '' })), 'Nóminas');
+  return wb;
+}
+async function descargarExcelGestoria() {
+  const wb = await libroExcel(await datosGestoria());
+  XLSX.writeFile(wb, `gestoria_${fGest.mes}.xlsx`);
+}
+async function descargarZipGestoria() {
+  const b = $('#b-zip'); const txt = b.textContent; b.disabled = true;
+  const paso = (t) => (b.textContent = t);
+  try {
+    paso('Preparando…');
+    await Promise.all([
+      cargarScript('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'),
+      cargarScript('https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js')
+    ]);
+    const d = await datosGestoria();
+    const zip = new JSZip();
+    const wb = await libroExcel(d);
+    zip.file(`resumen_${fGest.mes}.xlsx`, XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+    let i = 0;
+    for (const f of d.facturas) {
+      paso(`Factura ${++i}/${d.facturas.length}…`);
+      const lineas = await q(db().from('factura_lineas').select('*').eq('factura_id', f.id).order('orden'));
+      const pdf = await html2pdf().set({ margin: 10, html2canvas: { scale: 2 }, jsPDF: { unit: 'mm', format: 'a4' } }).from(htmlFactura(f, lineas)).outputPdf('blob');
+      zip.file(`facturas_emitidas/${f.codigo}.pdf`, pdf);
+    }
+    i = 0;
+    const conDoc = d.gastos.filter((g) => g.archivo_url);
+    for (const g of conDoc) {
+      paso(`Gasto ${++i}/${conDoc.length}…`);
+      const blob = await q(sb.storage.from(BUCKET).download(g.archivo_url));
+      const ext = (g.archivo_url.split('.').pop() || 'pdf').toLowerCase();
+      const nombre = `${g.fecha}_${(g.proveedor || 'proveedor').replace(/[^\w]+/g, '_')}_${(g.num_factura || i).toString().replace(/[^\w-]+/g, '_')}.${ext}`;
+      zip.file(`facturas_recibidas/${nombre}`, blob);
+    }
+    paso('Comprimiendo…');
+    const contenido = await zip.generateAsync({ type: 'blob' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(contenido); a.download = `gestoria_${fGest.mes}.zip`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    aviso('Paquete descargado');
+  } catch (e) { console.error(e); aviso('No se pudo generar el paquete: ' + traducirError(e), true); }
+  finally { b.disabled = false; b.textContent = txt; }
+}
+async function marcarEnviado() {
+  if (!confirm(`¿Marcar los gastos de ${mesTexto(fGest.mes)} como enviados a la gestoría?`)) return;
+  const ini = fGest.mes + '-01';
+  await q(db().from('gastos').update({ enviado_gestoria_mes: ini }).gte('fecha', ini).lte('fecha', finMes(ini)));
+  aviso('Marcado como enviado'); pGestoria();
+}
+
 
 arrancar();
