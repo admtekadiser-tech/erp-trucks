@@ -98,3 +98,12 @@ td.num,th.num{text-align:right;white-space:nowrap}
   .menu .pie span{display:none}
   .contenido{padding:16px}
 }
+
+/* Litigios: fases y seguimiento */
+.fases{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 14px}
+.fases span{font-size:12px;padding:4px 9px;border-radius:12px;background:#eef0f3;color:var(--gris)}
+.fases span.hecha{background:var(--verde-f);color:var(--verde)}
+.fases span.actual{background:var(--azul);color:#fff;font-weight:600}
+.historial{border-left:3px solid var(--borde);padding-left:12px;margin-top:10px}
+.historial div{padding:6px 0;font-size:14px}
+.historial .f{display:block;font-size:12px;color:var(--gris)}
