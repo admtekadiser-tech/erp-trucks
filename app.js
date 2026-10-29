@@ -104,7 +104,7 @@ function pantallaCambioPass(obligatorio) {
 /* ---------------------------------------------------------------- estructura */
 const MENU = [
   ['inicio', 'Inicio'], ['viajes', 'Viajes'], ['facturas', 'Facturas'], ['rutas', 'Rutas y tarifas'],
-  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Conductores'], ['gastos', 'Gastos'],
+  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Conductores'], ['incidencias', 'Incidencias'], ['litigios', 'Litigios'], ['gastos', 'Gastos'],
   ['gestoria', 'Gestoría'], ['empresa', 'Empresa']
 ];
 
@@ -128,7 +128,7 @@ async function pintar() {
     <main class="contenido" id="pagina"><div class="cargando">Cargando…</div></main>
   </div>`;
   const PAG = { inicio: pInicio, viajes: pViajes, facturas: pFacturas, factura: pFactura, rutas: pRutas, clientes: pClientes, empresa: pEmpresa,
-    flota: pFlota, conductores: pConductores, gastos: pGastos, gestoria: pGestoria };
+    flota: pFlota, conductores: pConductores, gastos: pGastos, gestoria: pGestoria, incidencias: pIncidencias, litigios: pLitigios };
   try { await (PAG[pag] || pProximamente)(id, pag); }
   catch (e) { console.error(e); $('#pagina').innerHTML = `<div class="tarjeta error">Error al cargar: ${esc(traducirError(e))}</div>`; }
 }
@@ -146,13 +146,15 @@ async function recargarMaestros() {
 
 /* ---------------------------------------------------------------- INICIO */
 async function pInicio() {
-  const [alertas, pend, cobro, mes, sinAsig] = await Promise.all([
+  const [alertasBase, seguimiento, pend, cobro, mes, sinAsig] = await Promise.all([
     q(db().from('v_alertas').select('*').order('fecha')),
+    q(db().from('v_alertas_seguimiento').select('*')),
     q(db().from('v_viajes').select('importe').is('factura_id', null).in('estado', ['pendiente', 'revisado'])),
     q(db().from('v_facturas_cobro').select('pendiente,estado_cobro').neq('estado_cobro', 'cobrada')),
     q(db().from('facturas').select('base').eq('estado', 'emitida').gte('fecha', inicioMes())),
     q(db().from('v_rutas_sin_asignar').select('id', { count: 'exact' }))
   ]);
+  const alertas = [...alertasBase, ...seguimiento].sort((a, b) => String(a.fecha || '').localeCompare(String(b.fecha || '')));
   const suma = (l, k) => l.reduce((a, x) => a + Number(x[k] || 0), 0);
   const vencido = cobro.filter((x) => x.estado_cobro === 'vencida');
   $('#pagina').innerHTML = `
@@ -166,7 +168,7 @@ async function pInicio() {
     <div class="kpi"><div class="t">Facturado este mes (base)</div><div class="n">${eur(suma(mes, 'base'))}</div><div class="t">${mes.length} facturas</div></div>
   </div>
   <h2>Avisos</h2>
-  ${alertas.length ? alertas.map((a) => `<div class="alerta ${a.nivel}">${et(a.nivel, { flota: 'Flota', conductores: 'Conductor', cobros: 'Cobro', facturacion: 'Facturación' }[a.grupo])} ${esc(a.texto)}<span class="f">${fecha(a.fecha)}</span></div>`).join('')
+  ${alertas.length ? alertas.map((a) => `<div class="alerta ${a.nivel}">${et(a.nivel, { flota: 'Flota', conductores: 'Conductor', cobros: 'Cobro', facturacion: 'Facturación', incidencias: 'Incidencia', litigios: 'Litigio' }[a.grupo])} ${esc(a.texto)}<span class="f">${fecha(a.fecha)}</span></div>`).join('')
     : '<div class="tarjeta vacio">Todo en orden: no hay avisos.</div>'}`;
 }
 
@@ -545,7 +547,7 @@ function registrarCobro(id, pendiente) {
   modal(`<h1>Registrar cobro</h1>
   <div class="rejilla"><div><label>Fecha</label><input type="date" id="co-fecha" value="${hoy()}"></div>
   <div><label>Importe</label><input type="number" step="0.01" id="co-importe" value="${Number(pendiente).toFixed(2)}"></div>
-  <div><label>Medio</label><select id="co-medio"><option>Transferencia</option><option>Confirming</option><option>Pagaré</option><option>Recibo</option><option>Efectivo</option></select></div></div>
+  <div><label>Medio</label><select id="co-medio"><option>Transferencia</option><option>Confirming</option><option>Pagaré</option><option>Recibo</option><option>Efectivo</option><option>Compensación litigio</option></select></div></div>
   <label>Notas</label><input id="co-notas">
   <div class="acciones"><button class="sec" onclick="cerrarModal()">Cancelar</button><button onclick="guardarCobro('${id}')">Guardar</button></div>`);
 }
@@ -780,7 +782,7 @@ async function sincronizarConductores() {
 }
 async function editarConductor(id, pestana = 'ficha') {
   const c = id ? await q(db().from('conductores').select('*').eq('id', id).single()) : { activo: true };
-  const tabs = id ? [['ficha', 'Ficha'], ['documentos', 'Documentos'], ...Object.entries(SUBCOND).map(([k, x]) => [k, x.titulo])] : [['ficha', 'Ficha']];
+  const tabs = id ? [['ficha', 'Ficha'], ['documentos', 'Documentos'], ...Object.entries(SUBCOND).map(([k, x]) => [k, x.titulo]), ['incidencias', 'Incidencias']] : [['ficha', 'Ficha']];
   let cuerpo = '';
   if (pestana === 'ficha') {
     const campo = (k, t, tipo = 'text') => `<div><label>${t}</label><input id="cd-${k}" type="${tipo}" value="${esc(c[k])}"></div>`;
@@ -790,6 +792,10 @@ async function editarConductor(id, pestana = 'ficha') {
       ${c.tc_conductor_id ? '<p class="ayuda">Vinculado a TransControl: el nombre se actualiza desde allí.</p>' : ''}
       <label>Notas</label><textarea id="cd-notas">${esc(c.notas)}</textarea>
       <div class="acciones"><button class="sec" onclick="cerrarModal();pConductores()">Cerrar</button><button onclick="guardarConductor(${id ? `'${id}'` : ''})">Guardar ficha</button></div>`;
+  } else if (pestana === 'incidencias') {
+    const inc = await q(db().from('v_incidencias').select('*').eq('conductor_id', id).order('fecha', { ascending: false }).limit(300));
+    cuerpo = `${tablaIncidencias(inc, false)}
+    <div class="acciones"><button onclick="editarIncidencia(null,{conductor_id:'${id}'})">+ Incidencia de este conductor</button></div>`;
   } else if (pestana === 'documentos') {
     const docs = await q(db().from('conductor_documentos').select('*').eq('conductor_id', id).order('renovado').order('fecha_vencimiento'));
     cuerpo = `${tablaVencimientos(docs, TIPOS_DOC, 'conductor_documentos', `editarConductor('${id}','documentos')`)}
@@ -1044,6 +1050,328 @@ async function marcarEnviado() {
   const ini = fGest.mes + '-01';
   await q(db().from('gastos').update({ enviado_gestoria_mes: ini }).gte('fecha', ini).lte('fecha', finMes(ini)));
   aviso('Marcado como enviado'); pGestoria();
+}
+
+
+/* ---------------------------------------------------------------- ARCHIVOS VARIOS (incidencias / litigios) */
+async function subirArchivos(inputId, carpeta) {
+  const files = [...(document.getElementById(inputId)?.files || [])];
+  const rutas = [];
+  for (const file of files) {
+    if (file.size > 10 * 1024 * 1024) { aviso(`«${file.name}» pesa más de 10 MB`, true); throw new Error('grande'); }
+    const limpio = file.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w.\-]+/g, '_').slice(-80);
+    const ruta = `${carpeta}/${Date.now()}_${rutas.length}_${limpio}`;
+    await q(sb.storage.from(BUCKET).upload(ruta, file, { contentType: file.type || undefined }));
+    rutas.push(ruta);
+  }
+  return rutas;
+}
+const enlacesArchivos = (rutas) => (rutas || []).map((r, i) => `<a href="javascript:void 0" onclick="event.stopPropagation();verArchivo('${esc(r)}')">📎 ${i + 1}</a>`).join(' ');
+const campoArchivos = (id, actuales) => `<div><label>Fotos / documentos ${actuales?.length ? '(ya tiene: ' + enlacesArchivos(actuales) + ')' : ''}</label><input type="file" id="${id}" accept="application/pdf,image/*" multiple></div>`;
+const MOTOR = ['tractora', 'rigido', 'furgoneta'];
+const camiones = () => S.vehiculos.filter((v) => MOTOR.includes(v.tipo));
+const remolques = () => S.vehiculos.filter((v) => !MOTOR.includes(v.tipo));
+const selVeh = (lista, sel) => opciones(lista, sel, '—', (x) => x.matricula);
+
+/* ---------------------------------------------------------------- INCIDENCIAS */
+const TIPOS_INC = { averia: 'Avería / rotura', accidente: 'Accidente / golpe', no_se_presenta: 'No va a trabajar', retraso: 'Retraso / se queda dormido', ruta_no_realizada: 'Ruta que no sale', temperatura: 'Problema de frío', multa: 'Multa / sanción', queja_cliente: 'Queja del cliente', otro: 'Otro' };
+const RESPONSABLE = { por_determinar: 'Por determinar', conductor: 'Conductor', empresa: 'Empresa', tercero: 'Un tercero', cliente: 'El cliente', ninguna: 'Nadie (fortuito)' };
+const ESTADO_INC = { abierta: ['rojo', 'Abierta'], en_curso: ['ambar', 'En curso'], cerrada: ['verde', 'Cerrada'] };
+const fInc = { estado: 'abiertas', desde: sumarDias(hoy(), -90), hasta: hoy(), tipo: '', conductor: '', vehiculo: '' };
+
+function tablaIncidencias(lista, conConductor = true) {
+  if (!lista.length) return '<div class="tabla-wrap"><div class="vacio">No hay incidencias.</div></div>';
+  return `<div class="tabla-wrap"><table>
+  <tr><th>Fecha</th><th>Tipo</th>${conConductor ? '<th>Conductor</th>' : ''}<th>Vehículo</th><th>Ruta / cliente</th><th>Qué ha pasado</th><th>Culpa</th><th class="num">Coste</th><th>Estado</th></tr>
+  ${lista.map((i) => { const [c, t] = ESTADO_INC[i.estado] || ['gris', i.estado]; const d = i.descripcion || ''; return `<tr class="clic" onclick="editarIncidencia('${i.id}')">
+    <td style="white-space:nowrap">${fecha(i.fecha)}${i.hora ? ' ' + i.hora.slice(0, 5) : ''}</td><td>${esc(TIPOS_INC[i.tipo] || i.tipo)}</td>
+    ${conConductor ? `<td>${esc(i.conductor_nombre)}</td>` : ''}
+    <td>${esc([i.matricula, i.remolque_matricula].filter(Boolean).join(' + '))}${i.vehiculo_parado_desde && !i.vehiculo_parado_hasta ? ' ' + et('rojo', 'Parado') : ''}</td>
+    <td>${esc([i.ruta_nombre, i.cliente_nombre].filter(Boolean).join(' · '))}</td>
+    <td>${esc(d.slice(0, 90))}${d.length > 90 ? '…' : ''}${i.num_litigios ? ' ' + et('azul', 'Litigio') : ''}</td>
+    <td>${i.responsabilidad === 'conductor' ? et('rojo', 'Conductor') : esc(RESPONSABLE[i.responsabilidad])}</td>
+    <td class="num">${i.coste != null ? eur(i.coste) : ''}</td><td>${et(c, t)}</td></tr>`; }).join('')}
+  </table></div>`;
+}
+
+async function pIncidencias() {
+  let qy = db().from('v_incidencias').select('*').order('fecha', { ascending: false }).order('creado_en', { ascending: false }).limit(1000);
+  if (fInc.estado === 'abiertas') qy = qy.neq('estado', 'cerrada');
+  else { qy = qy.gte('fecha', fInc.desde).lte('fecha', fInc.hasta); if (fInc.estado) qy = qy.eq('estado', fInc.estado); }
+  if (fInc.tipo) qy = qy.eq('tipo', fInc.tipo);
+  if (fInc.conductor) qy = qy.eq('conductor_id', fInc.conductor);
+  if (fInc.vehiculo) qy = qy.or(`vehiculo_id.eq.${fInc.vehiculo},remolque_id.eq.${fInc.vehiculo}`);
+  const [lista, periodo] = await Promise.all([
+    q(qy),
+    q(db().from('v_incidencias').select('conductor_id,conductor_nombre,tipo,aviso_previo,responsabilidad,coste').not('conductor_id', 'is', null).gte('fecha', fInc.desde).lte('fecha', fInc.hasta))
+  ]);
+  const res = {};
+  periodo.forEach((i) => {
+    const r = (res[i.conductor_id] ||= { nombre: i.conductor_nombre, total: 0, faltas: 0, sinAviso: 0, retrasos: 0, danos: 0, culpa: 0, coste: 0 });
+    r.total++;
+    if (i.tipo === 'no_se_presenta') { r.faltas++; if (i.aviso_previo === false) r.sinAviso++; }
+    if (i.tipo === 'retraso') r.retrasos++;
+    if (['averia', 'accidente'].includes(i.tipo)) r.danos++;
+    if (i.responsabilidad === 'conductor') { r.culpa++; r.coste += Number(i.coste || 0); }
+  });
+  const filas = Object.values(res).sort((a, b) => b.total - a.total);
+  $('#pagina').innerHTML = `
+  <h1>Incidencias</h1>
+  <div class="barra">
+    <div class="campo"><label>Ver</label><select id="fi-estado">${[['abiertas', 'Abiertas / en curso'], ['', 'Todas (por fechas)'], ['cerrada', 'Cerradas (por fechas)']].map(([k, t]) => `<option value="${k}" ${fInc.estado === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Desde</label><input type="date" id="fi-desde" value="${fInc.desde}"></div>
+    <div class="campo"><label>Hasta</label><input type="date" id="fi-hasta" value="${fInc.hasta}"></div>
+    <div class="campo"><label>Tipo</label><select id="fi-tipo"><option value="">Todos</option>${Object.entries(TIPOS_INC).map(([k, t]) => `<option value="${k}" ${fInc.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Conductor</label><select id="fi-conductor">${opciones(S.conductores, fInc.conductor, 'Todos')}</select></div>
+    <div class="campo"><label>Vehículo</label><select id="fi-vehiculo">${opciones(S.vehiculos, fInc.vehiculo, 'Todos', (x) => x.matricula)}</select></div>
+    <button onclick="editarIncidencia()">+ Nueva incidencia</button>
+  </div>
+  <p class="ayuda">${fInc.estado === 'abiertas' ? 'Se ven todas las que siguen abiertas, sean de la fecha que sean. ' : ''}Si una incidencia acaba en reclamación del cliente, ábrela y pulsa «Abrir litigio».</p>
+  ${tablaIncidencias(lista)}
+  <h2>Por conductor (${fecha(fInc.desde)} – ${fecha(fInc.hasta)})</h2>
+  ${filas.length ? `<div class="tabla-wrap"><table><tr><th>Conductor</th><th class="num">Total</th><th class="num">No va a trabajar</th><th class="num">De ellas sin avisar</th><th class="num">Retrasos</th><th class="num">Averías / golpes</th><th class="num">Por su culpa</th><th class="num">Coste por su culpa</th></tr>
+  ${filas.map((r) => `<tr><td><b>${esc(r.nombre)}</b></td><td class="num">${r.total}</td><td class="num">${r.faltas || ''}</td><td class="num">${r.sinAviso ? et('rojo', r.sinAviso) : ''}</td><td class="num">${r.retrasos || ''}</td><td class="num">${r.danos || ''}</td><td class="num">${r.culpa || ''}</td><td class="num">${r.coste ? eur(r.coste) : ''}</td></tr>`).join('')}
+  </table></div>` : '<p class="ayuda">Sin incidencias de conductores en estas fechas.</p>'}`;
+  ['estado', 'desde', 'hasta', 'tipo', 'conductor', 'vehiculo'].forEach((k) => { $('#fi-' + k).onchange = (e) => { fInc[k] = e.target.value; pIncidencias(); }; });
+}
+
+async function editarIncidencia(id, pre = {}) {
+  const i = id ? await q(db().from('incidencias').select('*').eq('id', id).single())
+    : { fecha: hoy(), tipo: 'averia', estado: 'abierta', responsabilidad: 'por_determinar', ...pre };
+  if (i.hora) i.hora = i.hora.slice(0, 5);
+  const [rutas, litigios] = await Promise.all([
+    q(db().from('rutas').select('id,nombre').not('cliente_id', 'is', null).order('nombre')),
+    id ? q(db().from('litigios').select('id,referencia_cliente,estado,fecha_apertura').eq('incidencia_id', id)) : Promise.resolve([])
+  ]);
+  editarIncidencia.archivos = i.archivos || [];
+  const sel = (k, obj) => `<select id="in-${k}">${Object.entries(obj).map(([x, t]) => `<option value="${x}" ${i[k] === x ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+  const inp = (k, tipo = 'text', extra = '') => `<input id="in-${k}" type="${tipo}" value="${esc(i[k])}" ${extra}>`;
+  modal(`<h1>${id ? 'Incidencia del ' + fecha(i.fecha) : 'Nueva incidencia'}</h1>
+  <div class="rejilla">
+    <div><label>Fecha</label>${inp('fecha', 'date')}</div>
+    <div><label>Hora (opcional)</label>${inp('hora', 'time')}</div>
+    <div><label>Tipo</label>${sel('tipo', TIPOS_INC)}</div>
+    <div><label>Estado</label>${sel('estado', Object.fromEntries(Object.entries(ESTADO_INC).map(([k, v]) => [k, v[1]])))}</div>
+    <div><label>Conductor</label><select id="in-conductor_id">${opciones(S.conductores, i.conductor_id, '—')}</select></div>
+    <div><label>Camión</label><select id="in-vehiculo_id">${selVeh(camiones(), i.vehiculo_id)}</select></div>
+    <div><label>Remolque</label><select id="in-remolque_id">${selVeh(remolques(), i.remolque_id)}</select></div>
+    <div><label>Cliente</label><select id="in-cliente_id">${opciones(S.clientes, i.cliente_id, '—')}</select></div>
+    <div><label>Ruta</label><select id="in-ruta_id">${opciones(rutas, i.ruta_id, '—')}</select></div>
+    <div><label>¿Avisó con antelación?</label><select id="in-aviso_previo"><option value="">—</option><option value="si" ${i.aviso_previo === true ? 'selected' : ''}>Sí, avisó</option><option value="no" ${i.aviso_previo === false ? 'selected' : ''}>No avisó</option></select></div>
+    <div><label>Minutos de retraso</label>${inp('minutos_retraso', 'number', 'min="0"')}</div>
+    <div><label>¿De quién es la culpa?</label>${sel('responsabilidad', RESPONSABLE)}</div>
+    <div><label>Coste € (taller, grúa…)</label>${inp('coste', 'number', 'step="0.01"')}</div>
+    <div><label>Vehículo parado desde</label>${inp('vehiculo_parado_desde', 'date')}</div>
+    <div><label>Parado hasta (vacío = sigue parado)</label>${inp('vehiculo_parado_hasta', 'date')}</div>
+    ${campoArchivos('in-archivos', i.archivos)}
+  </div>
+  <label>Qué ha pasado</label><textarea id="in-descripcion" placeholder="Ej.: se rompe el embrague en la A-2; avisa a las 5:10 que no viene…">${esc(i.descripcion)}</textarea>
+  <label>Qué se hizo / solución</label><textarea id="in-solucion" placeholder="Ej.: sale otro conductor con el camión de repuesto; grúa al taller…">${esc(i.solucion)}</textarea>
+  ${litigios.length ? `<h2>Litigios de esta incidencia</h2>${litigios.map((l) => `<div class="alerta ambar">${esc(l.referencia_cliente || 'Litigio')} · ${fecha(l.fecha_apertura)} ${et(FASE[l.estado]?.c || 'gris', FASE[l.estado]?.t || l.estado)}<a style="margin-left:auto;cursor:pointer;text-decoration:underline" onclick="editarLitigio('${l.id}')">Abrir</a></div>`).join('')}` : ''}
+  <div class="acciones">
+    ${id ? `<button class="peligro izq" onclick="borrarIncidencia('${id}')">Borrar</button><button class="sec" onclick="litigioDesdeIncidencia('${id}')">Abrir litigio</button>` : ''}
+    <button class="sec" onclick="cerrarModal()">Cancelar</button><button id="b-inc" onclick="guardarIncidencia(${id ? `'${id}'` : ''})">Guardar</button>
+  </div>`);
+}
+async function guardarIncidencia(id) {
+  const reg = {};
+  ['fecha', 'hora', 'tipo', 'estado', 'conductor_id', 'vehiculo_id', 'remolque_id', 'cliente_id', 'ruta_id', 'minutos_retraso', 'responsabilidad', 'coste',
+    'vehiculo_parado_desde', 'vehiculo_parado_hasta', 'descripcion', 'solucion'].forEach((k) => (reg[k] = val('in-' + k)));
+  const av = val('in-aviso_previo'); reg.aviso_previo = av == null ? null : av === 'si';
+  if (!reg.fecha || !reg.descripcion) return aviso('La fecha y «qué ha pasado» son obligatorios', true);
+  if (reg.vehiculo_parado_hasta && !reg.vehiculo_parado_desde) return aviso('Pon también desde cuándo está parado', true);
+  const b = $('#b-inc'); b.disabled = true;
+  try {
+    const nuevos = await subirArchivos('in-archivos', 'incidencias/' + reg.fecha.slice(0, 7));
+    if (nuevos.length) reg.archivos = [...editarIncidencia.archivos, ...nuevos];
+    if (id) await q(db().from('incidencias').update(reg).eq('id', id));
+    else await q(db().from('incidencias').insert(reg));
+    cerrarModal(); aviso('Incidencia guardada'); pintar();
+  } catch { b.disabled = false; }
+}
+async function borrarIncidencia(id) {
+  if (!confirm('¿Borrar esta incidencia?')) return;
+  await q(db().from('incidencias').delete().eq('id', id)); cerrarModal(); pintar();
+}
+async function litigioDesdeIncidencia(id) {
+  const i = await q(db().from('incidencias').select('*').eq('id', id).single());
+  editarLitigio(null, {
+    incidencia_id: id, cliente_id: i.cliente_id, conductor_id: i.conductor_id, vehiculo_id: i.vehiculo_id, remolque_id: i.remolque_id,
+    ruta_id: i.ruta_id, fecha_servicio: i.fecha, responsabilidad: i.responsabilidad, descripcion: i.descripcion,
+    motivo: { temperatura: 'temperatura', retraso: 'retraso', ruta_no_realizada: 'retraso' }[i.tipo] || 'otro'
+  });
+}
+
+/* ---------------------------------------------------------------- LITIGIOS */
+const MOTIVOS_LIT = { temperatura: 'Temperatura / rotura de frío', mercancia_danada: 'Mercancía dañada', faltante: 'Faltan bultos o palets', retraso: 'Retraso / servicio no realizado', entrega_erronea: 'Entrega errónea', documentacion: 'Documentación / albaranes', otro: 'Otro' };
+// Fases en orden. Se puede saltar de una a cualquier otra.
+const FASES_LIT = [
+  ['abierto', 'Abierto', 'rojo'],
+  ['documentando', 'Reuniendo pruebas', 'ambar'],
+  ['alegado', 'Alegaciones enviadas', 'ambar'],
+  ['cargado', 'Cobrado por el cliente', 'ambar'],
+  ['reclamado_seguro', 'Reclamado al seguro', 'azul'],
+  ['seguro_aceptado', 'Seguro acepta, falta el pago', 'azul'],
+  ['cerrado_recuperado', 'Cerrado · recuperado', 'verde'],
+  ['cerrado_sin_recuperar', 'Cerrado · sin recuperar', 'gris'],
+  ['anulado', 'Anulado (el cliente lo retira)', 'verde']
+];
+const FASE = Object.fromEntries(FASES_LIT.map(([k, t, c]) => [k, { t, c }]));
+const CERRADOS_LIT = ['cerrado_recuperado', 'cerrado_sin_recuperar', 'anulado'];
+const FORMA_CARGO = { descuento_pago: 'Nos lo descuentan del pago de una factura', factura_cargo: 'Nos mandan una factura de cargo', abono: 'Les hacemos una factura rectificativa', otro: 'Otro' };
+const fLit = { ver: 'abiertos', cliente: '', anio: hoy().slice(0, 4) };
+
+function estadoPlazo(d) {
+  const dias = Math.round((new Date(d + 'T12:00:00') - new Date(hoy() + 'T12:00:00')) / 86400000);
+  if (dias < 0) return et('rojo', 'Pasado ' + fecha(d));
+  if (dias <= 7) return et('ambar', fecha(d) + ' (' + (dias === 0 ? 'hoy' : dias + ' d') + ')');
+  return fecha(d);
+}
+
+async function pLitigios() {
+  const ini = fLit.anio + '-01-01'; const fin = fLit.anio + '-12-31';
+  const noCerrado = `(${CERRADOS_LIT.join(',')})`;
+  let qy = db().from('v_litigios').select('*').order('fecha_apertura', { ascending: false }).limit(1000);
+  if (fLit.ver === 'abiertos') qy = qy.not('estado', 'in', noCerrado);
+  else { qy = qy.gte('fecha_apertura', ini).lte('fecha_apertura', fin); if (fLit.ver === 'cerrados') qy = qy.in('estado', CERRADOS_LIT); else if (fLit.ver) qy = qy.eq('estado', fLit.ver); }
+  if (fLit.cliente) qy = qy.eq('cliente_id', fLit.cliente);
+  const [lista, delAnio, abiertos] = await Promise.all([
+    q(qy),
+    q(db().from('v_litigios').select('importe_cargado,importe_recuperado').gte('fecha_apertura', ini).lte('fecha_apertura', fin)),
+    q(db().from('v_litigios').select('importe_reclamado').not('estado', 'in', noCerrado))
+  ]);
+  const s = (l, k) => l.reduce((a, x) => a + Number(x[k] || 0), 0);
+  const cargado = s(delAnio, 'importe_cargado'); const recup = s(delAnio, 'importe_recuperado');
+  $('#pagina').innerHTML = `
+  <h1>Litigios</h1>
+  <div class="barra">
+    <div class="campo"><label>Ver</label><select id="fl2-ver">${[['abiertos', 'Abiertos (todos)'], ['', 'Todos del año'], ['cerrados', 'Cerrados del año'], ...FASES_LIT.map(([k, t]) => [k, 'Fase: ' + t])].map(([k, t]) => `<option value="${k}" ${fLit.ver === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+    <div class="campo"><label>Cliente</label><select id="fl2-cliente">${opciones(S.clientes, fLit.cliente, 'Todos')}</select></div>
+    <div class="campo"><label>Año</label><input type="number" id="fl2-anio" value="${fLit.anio}" style="width:100px"></div>
+    <button onclick="editarLitigio()">+ Nuevo litigio</button>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="t">Abiertos ahora</div><div class="n">${abiertos.length}</div><div class="t">${eur(s(abiertos, 'importe_reclamado'))} reclamados</div></div>
+    <div class="kpi"><div class="t">Nos han cobrado en ${fLit.anio}</div><div class="n">${eur(cargado)}</div><div class="t">${delAnio.length} litigios abiertos en el año</div></div>
+    <div class="kpi"><div class="t">Recuperado del seguro</div><div class="n" style="color:var(--verde)">${eur(recup)}</div></div>
+    <div class="kpi"><div class="t">Pérdida neta</div><div class="n" style="color:${cargado - recup > 0 ? 'var(--rojo)' : 'inherit'}">${eur(cargado - recup)}</div><div class="t">cobrado − recuperado</div></div>
+  </div>
+  <div class="tabla-wrap"><table>
+    <tr><th>Apertura</th><th>Ref. cliente</th><th>Cliente</th><th>Motivo</th><th>Conductor</th><th class="num">Reclamado</th><th class="num">Cobrado</th><th class="num">Recuperado</th><th>Fase</th><th>Próximo plazo</th></tr>
+    ${lista.map((l) => `<tr class="clic" onclick="editarLitigio('${l.id}')">
+      <td>${fecha(l.fecha_apertura)}</td><td><b>${esc(l.referencia_cliente) || '—'}</b></td><td>${esc(l.cliente_nombre)}</td><td>${esc(MOTIVOS_LIT[l.motivo] || l.motivo)}</td>
+      <td>${esc(l.conductor_nombre)}</td><td class="num">${l.importe_reclamado != null ? eur(l.importe_reclamado) : ''}</td>
+      <td class="num">${l.importe_cargado != null ? eur(l.importe_cargado) : ''}</td><td class="num">${l.importe_recuperado != null ? eur(l.importe_recuperado) : ''}</td>
+      <td>${et(FASE[l.estado]?.c || 'gris', FASE[l.estado]?.t || l.estado)}</td>
+      <td>${l.fecha_limite && !CERRADOS_LIT.includes(l.estado) ? estadoPlazo(l.fecha_limite) + (l.proxima_accion ? '<br><small>' + esc(l.proxima_accion) + '</small>' : '') : ''}</td></tr>`).join('')}
+  </table>${lista.length ? '' : '<div class="vacio">No hay litigios en esta vista.</div>'}</div>`;
+  ['ver', 'cliente', 'anio'].forEach((k) => { $('#fl2-' + k).onchange = (e) => { fLit[k] = e.target.value; pLitigios(); }; });
+}
+
+async function editarLitigio(id, pre = {}) {
+  const l = id ? await q(db().from('litigios').select('*').eq('id', id).single())
+    : { fecha_apertura: hoy(), estado: 'abierto', motivo: 'temperatura', responsabilidad: 'por_determinar', ...pre };
+  const [rutas, facturas, historial, comp] = await Promise.all([
+    q(db().from('rutas').select('id,nombre').not('cliente_id', 'is', null).order('nombre')),
+    q(db().from('facturas').select('id,codigo,cliente_id,fecha').eq('estado', 'emitida').order('fecha', { ascending: false }).limit(300)),
+    id ? q(db().from('litigio_historial').select('*').eq('litigio_id', id).order('fecha', { ascending: false })) : Promise.resolve([]),
+    id ? q(db().from('cobros').select('id,importe,fecha').eq('litigio_id', id)) : Promise.resolve([])
+  ]);
+  editarLitigio.archivos = l.archivos || [];
+  editarLitigio.pre = pre;
+  const inp = (k, t, tipo = 'text', extra = '') => `<div><label>${t}</label><input id="li-${k}" type="${tipo}" value="${esc(l[k])}" ${extra}></div>`;
+  const sel = (k, t, obj, vacio) => `<div><label>${t}</label><select id="li-${k}">${vacio != null ? `<option value="">${vacio}</option>` : ''}${Object.entries(obj).map(([x, tt]) => `<option value="${x}" ${l[k] === x ? 'selected' : ''}>${esc(tt)}</option>`).join('')}</select></div>`;
+  const nomCli = (cid) => (S.clientes.find((c) => c.id === cid) || {}).nombre || '';
+  const perdida = Number(l.importe_cargado || 0) - Number(l.importe_recuperado || 0);
+  const idx = FASES_LIT.findIndex(([k]) => k === l.estado);
+  modal(`<h1>${id ? 'Litigio ' + esc(l.referencia_cliente || '') + ' ' + et(FASE[l.estado]?.c || 'gris', FASE[l.estado]?.t || l.estado) : 'Nuevo litigio'}</h1>
+  ${id ? `<div class="fases">${FASES_LIT.map(([k, t], n) => `<span class="${n === idx ? 'actual' : n < idx ? 'hecha' : ''}">${esc(t)}</span>`).join('')}</div>` : ''}
+  ${l.incidencia_id ? `<p class="ayuda">Viene de una incidencia · <a style="cursor:pointer;text-decoration:underline" onclick="editarIncidencia('${l.incidencia_id}')">ver incidencia</a></p>` : ''}
+  <div class="rejilla">
+    ${inp('fecha_apertura', 'Fecha de apertura', 'date')}${inp('referencia_cliente', 'Nº / referencia del cliente')}
+    <div><label>Cliente</label><select id="li-cliente_id">${opciones(S.clientes, l.cliente_id)}</select></div>
+    ${sel('motivo', 'Motivo', MOTIVOS_LIT)}
+    ${inp('fecha_servicio', 'Fecha del servicio', 'date')}${inp('albaran', 'Albarán / eVoucher')}
+    <div><label>Conductor</label><select id="li-conductor_id">${opciones(S.conductores, l.conductor_id, '—')}</select></div>
+    <div><label>Camión</label><select id="li-vehiculo_id">${selVeh(camiones(), l.vehiculo_id)}</select></div>
+    <div><label>Remolque</label><select id="li-remolque_id">${selVeh(remolques(), l.remolque_id)}</select></div>
+    <div><label>Ruta</label><select id="li-ruta_id">${opciones(rutas, l.ruta_id, '—')}</select></div>
+    ${sel('responsabilidad', '¿De quién es la culpa?', RESPONSABLE)}
+    ${id ? '' : sel('estado', 'Fase en la que está', Object.fromEntries(FASES_LIT.map(([k, t]) => [k, t])))}
+    ${inp('fecha_limite', 'Próximo plazo', 'date')}${inp('proxima_accion', 'Qué hay que hacer antes del plazo', 'text', 'placeholder="Ej.: enviar alegaciones con el registro de temperatura"')}
+  </div>
+  <label>Qué reclama el cliente</label><textarea id="li-descripcion">${esc(l.descripcion)}</textarea>
+  <h2>Lo que nos cobra el cliente</h2>
+  <div class="rejilla">
+    ${inp('importe_reclamado', 'Importe que reclama €', 'number', 'step="0.01"')}${inp('importe_cargado', 'Importe que finalmente nos cobra €', 'number', 'step="0.01"')}
+    ${sel('forma_cargo', 'Cómo nos lo cobra', FORMA_CARGO, '—')}${inp('fecha_cargo', 'Fecha del cobro / descuento', 'date')}
+    <div><label>Factura nuestra afectada</label><select id="li-factura_id">${opciones(facturas, l.factura_id, '—', (f) => f.codigo + ' · ' + nomCli(f.cliente_id) + ' · ' + fecha(f.fecha))}</select></div>
+  </div>
+  ${id && l.forma_cargo === 'descuento_pago' ? (comp.length ? `<p class="ayuda">✓ Descuento de ${eur(comp[0].importe)} registrado en la factura.</p>`
+    : `<p class="ayuda">Si os lo han descontado del pago de una factura, regístralo para que esa factura no se quede como pendiente de cobro. <button class="sec peq" onclick="compensarLitigio('${id}')">Registrar descuento en la factura</button></p>`) : ''}
+  <h2>Seguro</h2>
+  <div class="rejilla">
+    ${inp('aseguradora', 'Aseguradora')}${inp('num_siniestro', 'Nº de siniestro')}${inp('fecha_parte_seguro', 'Fecha del parte', 'date')}
+    ${inp('importe_reclamado_seguro', 'Reclamado al seguro €', 'number', 'step="0.01"')}${inp('franquicia', 'Franquicia €', 'number', 'step="0.01"')}
+    ${inp('importe_recuperado', 'Recuperado del seguro €', 'number', 'step="0.01"')}${inp('fecha_cobro_seguro', 'Fecha de cobro del seguro', 'date')}
+    ${campoArchivos('li-archivos', l.archivos)}
+  </div>
+  ${id ? `<p style="text-align:right;font-size:16px">Pérdida neta: <b style="color:${perdida > 0 ? 'var(--rojo)' : 'var(--verde)'}">${eur(perdida)}</b></p>` : ''}
+  <label>Notas</label><textarea id="li-notas">${esc(l.notas)}</textarea>
+  <div class="acciones">
+    ${id ? `<button class="peligro izq" onclick="borrarLitigio('${id}')">Borrar</button>` : ''}
+    <button class="sec" onclick="cerrarModal()">Cerrar</button><button id="b-lit" onclick="guardarLitigio(${id ? `'${id}'` : ''})">Guardar</button>
+  </div>
+  ${id ? `<h2>Cambiar fase / seguimiento</h2>
+  <div class="barra">
+    <div class="campo"><label>Fase</label><select id="lh-estado">${FASES_LIT.map(([k, t]) => `<option value="${k}" ${k === l.estado ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+    <div class="campo" style="flex:1"><label>Nota (qué ha pasado, con quién habéis hablado…)</label><input id="lh-nota"></div>
+    <button onclick="cambiarFaseLitigio('${id}')">Guardar en el seguimiento</button>
+  </div>
+  <div class="historial">${historial.map((h) => `<div><span class="f">${new Date(h.fecha).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' })}${h.usuario_nombre ? ' · ' + esc(h.usuario_nombre) : ''}</span>
+    ${h.estado ? et(FASE[h.estado]?.c || 'gris', 'Fase: ' + (FASE[h.estado]?.t || h.estado)) : ''} ${esc(h.nota)}</div>`).join('')}</div>` : ''}`);
+}
+const CAMPOS_LIT = ['fecha_apertura', 'referencia_cliente', 'cliente_id', 'motivo', 'fecha_servicio', 'albaran', 'conductor_id', 'vehiculo_id', 'remolque_id', 'ruta_id',
+  'responsabilidad', 'fecha_limite', 'proxima_accion', 'descripcion', 'importe_reclamado', 'importe_cargado', 'forma_cargo', 'fecha_cargo', 'factura_id',
+  'aseguradora', 'num_siniestro', 'fecha_parte_seguro', 'importe_reclamado_seguro', 'franquicia', 'importe_recuperado', 'fecha_cobro_seguro', 'notas'];
+// seguir = true: guarda sin refrescar (lo usan «cambiar fase» y «registrar descuento»). Devuelve el id o null si falla.
+async function guardarLitigio(id, seguir = false) {
+  const reg = {};
+  CAMPOS_LIT.forEach((k) => (reg[k] = val('li-' + k)));
+  if (!id) { reg.estado = val('li-estado') || 'abierto'; if (editarLitigio.pre?.incidencia_id) reg.incidencia_id = editarLitigio.pre.incidencia_id; }
+  if (!reg.cliente_id || !reg.fecha_apertura) { aviso('Cliente y fecha de apertura son obligatorios', true); return null; }
+  const b = $('#b-lit'); if (b) b.disabled = true;
+  try {
+    const nuevos = await subirArchivos('li-archivos', 'litigios/' + reg.fecha_apertura.slice(0, 7));
+    if (nuevos.length) reg.archivos = [...editarLitigio.archivos, ...nuevos];
+    if (id) await q(db().from('litigios').update(reg).eq('id', id));
+    else id = (await q(db().from('litigios').insert(reg).select('id').single())).id;
+    if (seguir) return id;
+    aviso('Litigio guardado');
+    if (location.hash.startsWith('#litigios')) pLitigios();
+    editarLitigio(id);
+    return id;
+  } catch { if (b) b.disabled = false; return null; }
+}
+async function cambiarFaseLitigio(id) {
+  const estado = val('lh-estado'); const nota = val('lh-nota');
+  if (!(await guardarLitigio(id, true))) return;
+  await q(db().rpc('cambiar_estado_litigio', { p_litigio: id, p_estado: estado, p_nota: nota }));
+  aviso('Seguimiento actualizado');
+  if (location.hash.startsWith('#litigios')) pLitigios();
+  editarLitigio(id);
+}
+async function compensarLitigio(id) {
+  if (!(await guardarLitigio(id, true))) return;
+  const l = await q(db().from('litigios').select('*').eq('id', id).single());
+  if (!l.factura_id || !l.importe_cargado) return aviso('Elige la factura afectada y el importe que os han cobrado', true);
+  if (!confirm(`¿Registrar ${eur(l.importe_cargado)} como descuento en esa factura? Contará como cobrada por compensación.`)) return;
+  await q(db().from('cobros').insert({ factura_id: l.factura_id, fecha: l.fecha_cargo || hoy(), importe: l.importe_cargado, medio: 'Compensación litigio', litigio_id: id, notas: 'Litigio ' + (l.referencia_cliente || '') }));
+  aviso('Descuento registrado en la factura'); editarLitigio(id);
+}
+async function borrarLitigio(id) {
+  if (!confirm('¿Borrar este litigio y todo su seguimiento?')) return;
+  await q(db().from('litigios').delete().eq('id', id)); cerrarModal(); pintar();
 }
 
 
