@@ -99,11 +99,19 @@ td.num,th.num{text-align:right;white-space:nowrap}
   .contenido{padding:16px}
 }
 
-/* Litigios: fases y seguimiento */
-.fases{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 14px}
-.fases span{font-size:12px;padding:4px 9px;border-radius:12px;background:#eef0f3;color:var(--gris)}
-.fases span.hecha{background:var(--verde-f);color:var(--verde)}
-.fases span.actual{background:var(--azul);color:#fff;font-weight:600}
-.historial{border-left:3px solid var(--borde);padding-left:12px;margin-top:10px}
-.historial div{padding:6px 0;font-size:14px}
-.historial .f{display:block;font-size:12px;color:var(--gris)}
+/* Hoja de viajes (estilo Excel) */
+table.hoja td{vertical-align:top;padding:6px 6px}
+table.hoja th{white-space:nowrap}
+table.hoja input,table.hoja select{padding:4px 6px;font-size:13px;height:30px}
+table.hoja .c-exp{width:110px}
+table.hoja .c-cli{width:170px}
+table.hoja .c-alb{width:120px}
+table.hoja .c-imp{width:92px;text-align:right}
+table.hoja td.lineas div{height:30px;line-height:30px;white-space:nowrap;font-size:13px}
+table.hoja td.lineas div+div{margin-top:3px}
+table.hoja td small{color:var(--gris)}
+table.hoja tr.anulado td{opacity:.45}
+table.hoja tr.totales-fila td{background:#fafbfc;border-top:2px solid var(--borde)}
+table.hoja input:disabled,table.hoja select:disabled{background:#f6f7f9;color:var(--texto);border-color:transparent}
+input.ok{border-color:var(--verde);background:var(--verde-f)}
+input.mal{border-color:var(--rojo);background:var(--rojo-f)}

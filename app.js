@@ -1,5 +1,5 @@
-/* ERP TRUCKS CROS TRANSPORT · v0.1
-   App web para administración: viajes (desde TransControl), rutas y tarifas,
+/* ERP TRUCKS CROS TRANSPORT · v0.2
+   App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
 
@@ -23,6 +23,10 @@ const mesAnterior = () => { const x = new Date(inicioMes() + 'T12:00:00'); x.set
 const val = (id) => { const e = document.getElementById(id); if (!e) return null; if (e.type === 'checkbox') return e.checked; const v = e.value.trim(); return v === '' ? null : v; };
 const opciones = (lista, sel, vacio = '— elegir —', etq = (x) => x.nombre) =>
   `<option value="">${esc(vacio)}</option>` + lista.map((x) => `<option value="${x.id}" ${x.id === sel ? 'selected' : ''}>${esc(etq(x))}</option>`).join('');
+// Número escrito a la española ("1.234,50" o "650,5") → 1234.5 ; vacío → null
+const leerNum = (t) => { t = String(t ?? '').trim().replace(/\s|€/g, ''); if (!t) return null; if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.'); const n = Number(t); return isNaN(n) ? NaN : n; };
+const numCampo = (n) => (n == null ? '' : String(n).replace('.', ','));
+const lineas = (t) => (t || '').split('\n').map((s) => s.trim());
 
 function aviso(msg, err = false) {
   const a = $('#aviso'); a.textContent = msg; a.className = err ? 'err' : '';
@@ -50,6 +54,14 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') cerrarModa
 const ESTADO_VIAJE = { pendiente: 'ambar', revisado: 'azul', facturado: 'verde', anulado: 'gris' };
 const ESTADO_FACT = { borrador: ['gris', 'Borrador'], pendiente: ['ambar', 'Pendiente cobro'], vencida: ['rojo', 'Vencida'], cobrada: ['verde', 'Cobrada'], anulada: ['gris', 'Anulada'] };
 const TIPOS_TARIFA = { viaje: 'Precio del viaje', parada: 'Por parada adicional', hora_espera: 'Por hora de espera', festivo: 'Plus festivo', recargo_gasoil_pct: 'Recargo gasoil (%)', otro: 'Otro' };
+// Conceptos de cada viaje (mismas columnas que el Excel de liquidación)
+const CONCEPTOS = [
+  ['importe_ruta', 'Importe ruta', 'IMPORTE RUTA'],
+  ['importe_manipulacion', 'Importe manipul.', 'IMPORTE MANIPUL'],
+  ['importe_retorno', 'Importe retornos', 'IMPORTE RETORNOS'],
+  ['importe_paralizacion', 'Importe paralización', 'IMPORTE PARALIZACION'],
+  ['importe_peaje', 'Importe peaje', 'IMPORTE PEAJE']
+];
 const et = (cls, txt) => `<span class="et ${cls}">${esc(txt)}</span>`;
 
 /* ---------------------------------------------------------------- sesión */
@@ -103,8 +115,8 @@ function pantallaCambioPass(obligatorio) {
 
 /* ---------------------------------------------------------------- estructura */
 const MENU = [
-  ['inicio', 'Inicio'], ['viajes', 'Viajes'], ['facturas', 'Facturas'], ['rutas', 'Rutas y tarifas'],
-  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Conductores'], ['incidencias', 'Incidencias'], ['litigios', 'Litigios'], ['gastos', 'Gastos'],
+  ['inicio', 'Inicio'], ['viajes', 'Viajes'], ['facturas', 'Facturas'],
+  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Conductores'], ['gastos', 'Gastos'],
   ['gestoria', 'Gestoría'], ['empresa', 'Empresa']
 ];
 
@@ -116,7 +128,8 @@ async function pintar() {
     if (admin.error || !admin.data) { await sb.auth.signOut(); return pantallaLogin('Este usuario no tiene acceso al ERP'); }
     await recargarMaestros(); S.cargado = true;
   }
-  const [pag, id] = (location.hash.slice(1) || 'inicio').split('/');
+  let [pag, id] = (location.hash.slice(1) || 'inicio').split('/');
+  if (pag === 'rutas') pag = 'viajes'; // la pestaña «Rutas y tarifas» ya no existe
   const nombre = S.usuario.user_metadata?.nombre || S.usuario.email.split('@')[0];
   $('#app').innerHTML = `
   <div class="layout">
@@ -127,8 +140,8 @@ async function pintar() {
     </nav>
     <main class="contenido" id="pagina"><div class="cargando">Cargando…</div></main>
   </div>`;
-  const PAG = { inicio: pInicio, viajes: pViajes, facturas: pFacturas, factura: pFactura, rutas: pRutas, clientes: pClientes, empresa: pEmpresa,
-    flota: pFlota, conductores: pConductores, gastos: pGastos, gestoria: pGestoria, incidencias: pIncidencias, litigios: pLitigios };
+  const PAG = { inicio: pInicio, viajes: pViajes, facturas: pFacturas, factura: pFactura, clientes: pClientes, empresa: pEmpresa,
+    flota: pFlota, conductores: pConductores, gastos: pGastos, gestoria: pGestoria };
   try { await (PAG[pag] || pProximamente)(id, pag); }
   catch (e) { console.error(e); $('#pagina').innerHTML = `<div class="tarjeta error">Error al cargar: ${esc(traducirError(e))}</div>`; }
 }
@@ -146,68 +159,165 @@ async function recargarMaestros() {
 
 /* ---------------------------------------------------------------- INICIO */
 async function pInicio() {
-  const [alertasBase, seguimiento, pend, cobro, mes, sinAsig] = await Promise.all([
+  const [alertas, pend, cobro, mes, sinCli] = await Promise.all([
     q(db().from('v_alertas').select('*').order('fecha')),
-    q(db().from('v_alertas_seguimiento').select('*')),
     q(db().from('v_viajes').select('importe').is('factura_id', null).in('estado', ['pendiente', 'revisado'])),
     q(db().from('v_facturas_cobro').select('pendiente,estado_cobro').neq('estado_cobro', 'cobrada')),
     q(db().from('facturas').select('base').eq('estado', 'emitida').gte('fecha', inicioMes())),
-    q(db().from('v_rutas_sin_asignar').select('id', { count: 'exact' }))
+    q(db().from('viajes').select('id').is('cliente_id', null).neq('estado', 'anulado'))
   ]);
-  const alertas = [...alertasBase, ...seguimiento].sort((a, b) => String(a.fecha || '').localeCompare(String(b.fecha || '')));
   const suma = (l, k) => l.reduce((a, x) => a + Number(x[k] || 0), 0);
   const vencido = cobro.filter((x) => x.estado_cobro === 'vencida');
   $('#pagina').innerHTML = `
   <h1>Inicio</h1>
   ${!S.empresa ? `<div class="alerta ambar">Faltan los datos de la empresa para poder facturar. <a href="#empresa" style="margin-left:auto">Rellenar ahora</a></div>` : ''}
-  ${sinAsig.length ? `<div class="alerta ambar">Hay ${sinAsig.length} rutas de TransControl sin cliente asignado: sus viajes no entran en el ERP. <a href="#rutas" style="margin-left:auto">Asignar</a></div>` : ''}
+  ${sinCli.length ? `<div class="alerta ambar">Hay ${sinCli.length} viajes sin cliente asignado: no entrarán en ninguna factura. <a href="#viajes" onclick="fViajes.cliente='sin'" style="margin-left:auto">Asignar</a></div>` : ''}
   <div class="kpis">
-    <div class="kpi"><div class="t">Viajes sin facturar</div><div class="n">${pend.length}</div><div class="t">${eur(suma(pend, 'importe'))} estimado</div></div>
+    <div class="kpi"><div class="t">Viajes sin facturar</div><div class="n">${pend.length}</div><div class="t">${eur(suma(pend, 'importe'))}</div></div>
     <div class="kpi"><div class="t">Pendiente de cobro</div><div class="n">${eur(suma(cobro, 'pendiente'))}</div><div class="t">${cobro.length} facturas</div></div>
     <div class="kpi"><div class="t">Vencido sin cobrar</div><div class="n" style="color:${vencido.length ? 'var(--rojo)' : 'inherit'}">${eur(suma(vencido, 'pendiente'))}</div><div class="t">${vencido.length} facturas</div></div>
     <div class="kpi"><div class="t">Facturado este mes (base)</div><div class="n">${eur(suma(mes, 'base'))}</div><div class="t">${mes.length} facturas</div></div>
   </div>
   <h2>Avisos</h2>
-  ${alertas.length ? alertas.map((a) => `<div class="alerta ${a.nivel}">${et(a.nivel, { flota: 'Flota', conductores: 'Conductor', cobros: 'Cobro', facturacion: 'Facturación', incidencias: 'Incidencia', litigios: 'Litigio' }[a.grupo])} ${esc(a.texto)}<span class="f">${fecha(a.fecha)}</span></div>`).join('')
+  ${alertas.length ? alertas.map((a) => `<div class="alerta ${a.nivel}">${et(a.nivel, { flota: 'Flota', conductores: 'Conductor', cobros: 'Cobro', facturacion: 'Facturación' }[a.grupo])} ${esc(a.texto)}<span class="f">${fecha(a.fecha)}</span></div>`).join('')
     : '<div class="tarjeta vacio">Todo en orden: no hay avisos.</div>'}`;
 }
 
-/* ---------------------------------------------------------------- VIAJES */
-const fViajes = { desde: inicioMes(), hasta: hoy(), cliente: '', estado: 'sin_facturar' };
+/* ---------------------------------------------------------------- VIAJES
+   Hoja tipo Excel: una fila por viaje (ruta + fecha + conductor). Los importes,
+   el Nº de expedición y los albaranes se escriben directamente en la tabla. */
+const fViajes = { desde: inicioMes(), hasta: hoy(), cliente: '', estado: 'sin_facturar', buscar: '' };
 async function pViajes() {
-  let qy = db().from('v_viajes').select('*').gte('fecha', fViajes.desde).lte('fecha', fViajes.hasta).order('fecha', { ascending: false }).order('ruta_nombre').limit(1000);
-  if (fViajes.cliente) qy = qy.eq('cliente_id', fViajes.cliente);
+  let qy = db().from('v_viajes').select('*').gte('fecha', fViajes.desde).lte('fecha', fViajes.hasta)
+    .order('fecha', { ascending: false }).order('ruta_nombre').limit(2000);
+  if (fViajes.cliente === 'sin') qy = qy.is('cliente_id', null);
+  else if (fViajes.cliente) qy = qy.eq('cliente_id', fViajes.cliente);
   if (fViajes.estado === 'sin_facturar') qy = qy.is('factura_id', null).neq('estado', 'anulado');
   else if (fViajes.estado) qy = qy.eq('estado', fViajes.estado);
-  const lista = await q(qy);
-  const total = lista.reduce((a, v) => a + Number(v.importe || 0), 0);
+  let lista = await q(qy);
+  if (fViajes.buscar) {
+    const b = fViajes.buscar.toLowerCase();
+    lista = lista.filter((v) => [v.ruta_nombre, v.num_expedicion, v.conductor_nombre, v.cliente_nombre, ...(v.detalle_clientes || []), ...(v.albaranes || [])]
+      .some((x) => (x || '').toLowerCase().includes(b)));
+  }
+  pViajes.lista = lista;
+  const sinCliente = lista.filter((v) => !v.cliente_id && !v.factura_id);
   $('#pagina').innerHTML = `
   <h1>Viajes</h1>
   <div class="barra">
     <div class="campo"><label>Desde</label><input type="date" id="fv-desde" value="${fViajes.desde}"></div>
     <div class="campo"><label>Hasta</label><input type="date" id="fv-hasta" value="${fViajes.hasta}"></div>
-    <div class="campo"><label>Cliente</label><select id="fv-cliente">${opciones(S.clientes, fViajes.cliente, 'Todos')}</select></div>
+    <div class="campo"><label>Cliente</label><select id="fv-cliente">${opciones(S.clientes, fViajes.cliente, 'Todos').replace('<option value="">Todos</option>', `<option value="">Todos</option><option value="sin" ${fViajes.cliente === 'sin' ? 'selected' : ''}>— Sin cliente —</option>`)}</select></div>
     <div class="campo"><label>Estado</label><select id="fv-estado">
       ${[['sin_facturar', 'Sin facturar'], ['', 'Todos'], ['pendiente', 'Pendientes'], ['revisado', 'Revisados'], ['facturado', 'Facturados'], ['anulado', 'Anulados']].map(([k, t]) => `<option value="${k}" ${fViajes.estado === k ? 'selected' : ''}>${t}</option>`).join('')}
     </select></div>
+    <div class="campo"><label>Buscar</label><input id="fv-buscar" value="${esc(fViajes.buscar)}" placeholder="Ruta, expedición, albarán…"></div>
+  </div>
+  <div class="barra">
     <button class="sec" onclick="importarViajes()">⟳ Importar de TransControl</button>
+    <button class="sec" onclick="exportarViajesExcel()">⬇ Excel</button>
     <button onclick="editarViaje()">+ Viaje manual</button>
   </div>
-  <p class="ayuda">${lista.length} viajes · ${eur(total)} (según tarifas). Pulsa un viaje para ajustar paradas, esperas o precio.</p>
-  <div class="tabla-wrap"><table>
-    <tr><th>Fecha</th><th>Cliente</th><th>Ruta</th><th>Conductor</th><th class="num">Entregas</th><th class="num">Paradas cobradas</th><th class="num">Palets</th><th class="num">Importe</th><th>Estado</th></tr>
-    ${lista.map((v) => `<tr class="clic" onclick="editarViaje('${v.id}')">
-      <td>${fecha(v.fecha)}</td><td>${esc(v.cliente_nombre)}</td><td>${esc(v.ruta_nombre)}</td><td>${esc(v.conductor_nombre)}</td>
-      <td class="num">${v.num_entregas}</td><td class="num">${v.num_paradas}</td><td class="num">${v.palets_entregados ?? ''}</td>
-      <td class="num">${v.importe > 0 ? eur(v.importe) : et('rojo', 'Sin tarifa')}</td>
-      <td>${v.factura_codigo ? et('verde', v.factura_codigo) : v.factura_id ? et('azul', 'En borrador') : et(ESTADO_VIAJE[v.estado], v.estado)}</td></tr>`).join('')}
-  </table>${lista.length ? '' : '<div class="vacio">No hay viajes con estos filtros.</div>'}</div>`;
+  ${sinCliente.length ? `<div class="alerta ambar">${sinCliente.length} viajes de esta lista no tienen cliente (a quién se factura).
+    <select id="masivo-cliente" style="width:auto;margin-left:auto">${opciones(S.clientes, null, '— elegir cliente —')}</select>
+    <button class="peq" onclick="asignarClienteMasivo()">Asignar a los ${sinCliente.length}</button></div>` : ''}
+  <p class="ayuda">${lista.length} viajes. Escribe los importes, el Nº de expedición y los albaranes directamente en la tabla: se guardan solos al salir de la casilla.
+  Al poner el cliente a una ruta, las próximas importaciones de esa ruta ya vendrán con ese cliente y con el último importe de ruta y peaje.</p>
+  <div class="tabla-wrap"><table class="hoja" id="t-viajes">
+    <tr><th>Fecha carga</th><th>Ruta</th><th>Nº expedición</th><th>Cliente (factura)</th><th>Detalle clientes</th><th>Detalle albaranes</th>
+      ${CONCEPTOS.map(([, t]) => `<th class="num">${t}</th>`).join('')}<th class="num">Total</th><th>Estado</th><th></th></tr>
+    ${lista.map(filaViaje).join('')}
+    ${lista.length ? `<tr class="totales-fila"><td colspan="6"><b>Total</b></td>${CONCEPTOS.map(([k]) => `<td class="num" id="tot-${k}"></td>`).join('')}<td class="num" id="tot-total"></td><td colspan="2"></td></tr>` : ''}
+  </table>${lista.length ? '' : '<div class="vacio">No hay viajes con estos filtros. Pulsa «Importar de TransControl».</div>'}</div>`;
   ['desde', 'hasta', 'cliente', 'estado'].forEach((k) => { $('#fv-' + k).onchange = (e) => { fViajes[k] = e.target.value; pViajes(); }; });
+  $('#fv-buscar').oninput = (e) => { fViajes.buscar = e.target.value; clearTimeout(pViajes.t); pViajes.t = setTimeout(() => { pViajes().then(() => { const b = $('#fv-buscar'); b.focus(); b.setSelectionRange(b.value.length, b.value.length); }); }, 350); };
+  recalcularTotalesViajes();
+}
+function filaViaje(v) {
+  const dis = v.factura_id ? 'disabled' : '';
+  const clientes = v.detalle_clientes || [];
+  const albs = v.albaranes || [];
+  const n = Math.max(clientes.length, albs.length, 1);
+  const filas = Array.from({ length: n }, (_, i) => i);
+  return `<tr data-id="${v.id}" class="${v.estado === 'anulado' ? 'anulado' : ''}">
+    <td>${fecha(v.fecha)}<br><small>${esc(v.conductor_nombre)}</small></td>
+    <td><b>${esc(v.ruta_nombre || '—')}</b></td>
+    <td><input class="c-exp" value="${esc(v.num_expedicion)}" ${dis} onchange="guardarCelda(this,'num_expedicion')"></td>
+    <td><select class="c-cli" ${dis} onchange="guardarCelda(this,'cliente_id')">${opciones(S.clientes, v.cliente_id, '— sin cliente —')}</select></td>
+    <td class="lineas">${filas.map((i) => `<div>${esc(clientes[i] || '')}</div>`).join('')}</td>
+    <td class="lineas">${filas.map((i) => `<div><input class="c-alb" value="${esc(albs[i] || '')}" ${dis} onchange="guardarCelda(this,'albaranes')"></div>`).join('')}</td>
+    ${CONCEPTOS.map(([k]) => `<td class="num"><input class="c-imp" data-campo="${k}" inputmode="decimal" value="${numCampo(k === 'importe_ruta' ? (v.importe_ruta ?? v.precio_manual) : v[k])}" ${dis} onchange="guardarCelda(this,'${k}')"></td>`).join('')}
+    <td class="num c-total"><b>${eur(v.importe)}</b></td>
+    <td>${v.factura_codigo ? et('verde', v.factura_codigo) : v.factura_id ? et('azul', 'En borrador') : et(ESTADO_VIAJE[v.estado], v.estado)}</td>
+    <td><button class="sec peq" title="Abrir ficha del viaje" onclick="editarViaje('${v.id}')">✎</button></td>
+  </tr>`;
+}
+async function guardarCelda(el, campo) {
+  const tr = el.closest('tr'); const id = tr.dataset.id;
+  let valor;
+  if (campo === 'albaranes') {
+    const a = [...tr.querySelectorAll('.c-alb')].map((x) => x.value.trim());
+    valor = a.some(Boolean) ? a : null;
+  } else if (campo.startsWith('importe_')) {
+    valor = leerNum(el.value);
+    if (Number.isNaN(valor)) { el.classList.add('mal'); return aviso('Importe no válido: escribe solo el número, p. ej. 650,50', true); }
+    el.classList.remove('mal');
+    el.value = numCampo(valor);
+  } else valor = el.value.trim() || null;
+  try {
+    await q(db().from('viajes').update({ [campo]: valor }).eq('id', id));
+    const v = pViajes.lista.find((x) => x.id === id);
+    if (v) { v[campo] = valor; if (campo === 'cliente_id') v.cliente_nombre = (S.clientes.find((c) => c.id === valor) || {}).nombre; }
+    el.classList.add('ok'); setTimeout(() => el.classList.remove('ok'), 900);
+    if (campo.startsWith('importe_')) {
+      const total = [...tr.querySelectorAll('.c-imp')].reduce((a, x) => a + (leerNum(x.value) || 0), 0);
+      if (v) v.importe = total;
+      tr.querySelector('.c-total').innerHTML = `<b>${eur(total)}</b>`;
+      recalcularTotalesViajes();
+    }
+  } catch { el.classList.add('mal'); }
+}
+function recalcularTotalesViajes() {
+  const t = $('#t-viajes'); if (!t || !$('#tot-total')) return;
+  let total = 0;
+  CONCEPTOS.forEach(([k]) => {
+    const s = [...t.querySelectorAll(`tr:not(.anulado) .c-imp[data-campo="${k}"]`)].reduce((a, x) => a + (leerNum(x.value) || 0), 0);
+    total += s; $('#tot-' + k).textContent = eur(s);
+  });
+  $('#tot-total').innerHTML = `<b>${eur(total)}</b>`;
+}
+async function asignarClienteMasivo() {
+  const c = val('masivo-cliente');
+  if (!c) return aviso('Elige el cliente', true);
+  const ids = pViajes.lista.filter((v) => !v.cliente_id && !v.factura_id).map((v) => v.id);
+  await q(db().from('viajes').update({ cliente_id: c }).in('id', ids));
+  aviso(`${ids.length} viajes asignados`); pViajes();
+}
+
+async function exportarViajesExcel() {
+  await cargarScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+  const lista = [...pViajes.lista].filter((v) => v.estado !== 'anulado').sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.ruta_nombre || '').localeCompare(b.ruta_nombre || ''));
+  const filas = [];
+  for (const v of lista) {
+    const cli = v.detalle_clientes || []; const alb = v.albaranes || [];
+    const n = Math.max(cli.length, alb.length, 1);
+    for (let i = 0; i < n; i++) {
+      const f = { RUTA: v.ruta_nombre || '', 'Nº EXPEDICION': v.num_expedicion || '', 'FECHA CARGA': fecha(v.fecha), 'DETALLE CLIENTES': cli[i] || '', 'DETALLE ALBARANES': alb[i] || '' };
+      // los importes van solo en la primera fila de cada viaje para que la suma no se duplique
+      CONCEPTOS.forEach(([k, , col]) => { const x = k === 'importe_ruta' ? (v.importe_ruta ?? v.precio_manual) : v[k]; f[col] = i === 0 && x != null ? Number(x) : ''; });
+      filas.push(f);
+    }
+  }
+  const ws = XLSX.utils.json_to_sheet(filas.length ? filas : [{ '': 'Sin viajes' }]);
+  ws['!cols'] = [12, 14, 12, 38, 18, 13, 13, 13, 15, 13].map((w) => ({ wch: w }));
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Viajes');
+  XLSX.writeFile(wb, `viajes_${fViajes.desde}_${fViajes.hasta}.xlsx`);
 }
 
 function importarViajes() {
   modal(`<h1>Importar viajes de TransControl</h1>
-  <p class="ayuda">Trae los viajes que han registrado los conductores. Solo entran las rutas que ya tienen cliente asignado; las rutas nuevas aparecerán en «Rutas y tarifas». Los viajes ya importados no se duplican. TransControl no se modifica.</p>
+  <p class="ayuda">Trae todos los viajes que han registrado los conductores, con el detalle de clientes de cada descarga.
+  Los viajes ya importados no se duplican. TransControl no se modifica.</p>
   <div class="rejilla"><div><label>Desde</label><input type="date" id="i-desde" value="${sumarDias(hoy(), -60)}"></div>
   <div><label>Hasta</label><input type="date" id="i-hasta" value="${hoy()}"></div></div>
   <div class="acciones"><button class="sec" onclick="cerrarModal()">Cancelar</button><button id="b-imp" onclick="hacerImportacion()">Importar</button></div>`);
@@ -217,143 +327,81 @@ async function hacerImportacion() {
   try {
     const r = await q(db().rpc('importar_viajes_transcontrol', { p_desde: val('i-desde'), p_hasta: val('i-hasta') }));
     const x = r[0] || {}; cerrarModal(); await recargarMaestros();
-    aviso(`${x.viajes_nuevos} viajes nuevos importados${x.rutas_nuevas ? ` · ${x.rutas_nuevas} rutas nuevas por asignar` : ''}`);
+    aviso(`${x.viajes_nuevos} viajes nuevos importados`);
     pintar();
   } catch { $('#b-imp').disabled = false; $('#b-imp').textContent = 'Importar'; }
 }
 
 async function editarViaje(id) {
   const v = id ? await q(db().from('viajes').select('*').eq('id', id).single()) : { fecha: hoy(), num_entregas: 1, num_paradas: 0, estado: 'pendiente' };
-  const extras = id ? await q(db().from('viaje_extras').select('*').eq('viaje_id', id)) : [];
-  const rutas = await q(db().from('rutas').select('id,nombre,cliente_id').not('cliente_id', 'is', null).eq('ignorar', false).order('nombre'));
-  const importe = id ? await q(db().rpc('importe_viaje', { p_viaje: id })) : null;
+  const rutas = await q(db().from('rutas').select('id,nombre,cliente_id').eq('ignorar', false).order('nombre'));
+  editarViaje.rutas = rutas;
+  const ruta = rutas.find((r) => r.id === v.ruta_id);
   const bloqueado = !!v.factura_id;
   const dis = bloqueado ? 'disabled' : '';
+  const imp = (k) => (k === 'importe_ruta' ? (v.importe_ruta ?? v.precio_manual) : v[k]);
   modal(`<h1>${id ? 'Viaje del ' + fecha(v.fecha) : 'Nuevo viaje manual'}</h1>
   ${bloqueado ? '<p class="ayuda">Este viaje ya está en una factura: no se puede modificar.</p>' : ''}
-  ${v.transcontrol_id ? `<p class="ayuda">Importado de TransControl · ${v.num_entregas} puntos de descarga${v.albaranes ? ' · eVoucher: ' + esc(v.albaranes.join(', ')) : ''}</p>` : ''}
+  ${v.transcontrol_id ? `<p class="ayuda">Importado de TransControl · ${v.num_entregas} puntos de descarga</p>` : ''}
   <div class="rejilla">
-    <div><label>Fecha</label><input type="date" id="v-fecha" value="${v.fecha}" ${dis}></div>
-    <div><label>Cliente</label><select id="v-cliente" ${dis} onchange="filtrarRutasViaje()">${opciones(S.clientes, v.cliente_id)}</select></div>
-    <div><label>Ruta</label><select id="v-ruta" ${dis}>${opciones(rutas.filter((r) => !v.cliente_id || r.cliente_id === v.cliente_id), v.ruta_id, '— sin ruta —')}</select></div>
+    <div><label>Fecha carga</label><input type="date" id="v-fecha" value="${v.fecha}" ${dis}></div>
+    <div><label>Ruta</label><input id="v-ruta" list="l-rutas" value="${esc(ruta?.nombre)}" placeholder="Escribe o elige" ${dis}>
+      <datalist id="l-rutas">${rutas.map((r) => `<option value="${esc(r.nombre)}">`).join('')}</datalist></div>
+    <div><label>Nº expedición</label><input id="v-exp" value="${esc(v.num_expedicion)}" ${dis}></div>
+    <div><label>Cliente (a quién se factura)</label><select id="v-cliente" ${dis}>${opciones(S.clientes, v.cliente_id)}</select></div>
     <div><label>Conductor</label><select id="v-conductor" ${dis}>${opciones(S.conductores, v.conductor_id, '—')}</select></div>
     <div><label>Tractora / camión</label><select id="v-tractora" ${dis}>${opciones(S.vehiculos, v.tractora_id, '—', (x) => x.matricula + ' · ' + x.tipo)}</select></div>
-    <div><label>Paradas que se cobran</label><input type="number" min="0" id="v-paradas" value="${v.num_paradas}" ${dis}></div>
-    <div><label>Precio especial (opcional)</label><input type="number" step="0.01" id="v-precio" value="${v.precio_manual ?? ''}" placeholder="Usa la tarifa" ${dis}></div>
-    <div><label>Albaranes (separados por coma)</label><input id="v-albaranes" value="${esc((v.albaranes || []).join(', '))}" ${dis}></div>
+  </div>
+  <div class="rejilla">
+    <div><label>Detalle clientes (uno por línea)</label><textarea id="v-detalle" rows="4" ${dis}>${esc((v.detalle_clientes || []).join('\n'))}</textarea></div>
+    <div><label>Detalle albaranes (uno por línea, en el mismo orden)</label><textarea id="v-albaranes" rows="4" ${dis}>${esc((v.albaranes || []).join('\n'))}</textarea></div>
+  </div>
+  <div class="rejilla">
+    ${CONCEPTOS.map(([k, t]) => `<div><label>${t} €</label><input id="v-${k}" inputmode="decimal" value="${numCampo(imp(k))}" ${dis} oninput="totalFichaViaje()"></div>`).join('')}
+  </div>
+  <div class="rejilla">
     <div><label>Km</label><input type="number" id="v-km" value="${v.km ?? ''}" ${dis}></div>
     <div><label>Estado</label><select id="v-estado" ${dis}>${['pendiente', 'revisado', 'anulado'].concat(bloqueado ? ['facturado'] : []).map((e) => `<option ${v.estado === e ? 'selected' : ''}>${e}</option>`).join('')}</select></div>
   </div>
   <label>Notas</label><textarea id="v-notas" ${dis}>${esc(v.notas)}</textarea>
-  ${id ? `<h2>Extras (esperas, festivos…)</h2>
-  <div class="tabla-wrap"><table><tr><th>Tipo</th><th>Descripción</th><th class="num">Cantidad</th><th class="num">Precio</th><th></th></tr>
-    ${extras.map((e) => `<tr><td>${esc(TIPOS_TARIFA[e.tipo] || e.tipo)}</td><td>${esc(e.descripcion)}</td><td class="num">${num(e.cantidad)}</td><td class="num">${e.precio_manual != null ? eur(e.precio_manual) : 'Tarifa'}</td>
-      <td>${bloqueado ? '' : `<button class="sec peq" onclick="borrarExtra('${e.id}','${id}')">Quitar</button>`}</td></tr>`).join('')}
-    ${bloqueado ? '' : `<tr><td><select id="x-tipo"><option value="hora_espera">Horas de espera</option><option value="festivo">Festivo</option><option value="otro">Otro</option></select></td>
-      <td><input id="x-desc" placeholder="Ej.: espera en descarga"></td><td><input type="number" step="0.25" id="x-cant" value="1" style="width:80px"></td>
-      <td><input type="number" step="0.01" id="x-precio" placeholder="Tarifa" style="width:100px"></td><td><button class="peq" onclick="anadirExtra('${id}')">Añadir</button></td></tr>`}
-  </table></div>
-  <p style="text-align:right;font-size:17px">Importe del viaje: <b>${importe > 0 ? eur(importe) : 'sin tarifa'}</b></p>` : ''}
+  <p style="text-align:right;font-size:17px">Total del viaje: <b id="v-total"></b></p>
   <div class="acciones">
     ${id && !bloqueado && !v.transcontrol_id ? `<button class="peligro izq" onclick="borrarViaje('${id}')">Borrar</button>` : ''}
     <button class="sec" onclick="cerrarModal()">${bloqueado ? 'Cerrar' : 'Cancelar'}</button>
     ${bloqueado ? '' : `<button onclick="guardarViaje(${id ? `'${id}'` : ''})">Guardar</button>`}
   </div>`);
-  editarViaje.rutas = rutas;
+  totalFichaViaje();
 }
-function filtrarRutasViaje() {
-  const c = val('v-cliente');
-  $('#v-ruta').innerHTML = opciones(editarViaje.rutas.filter((r) => r.cliente_id === c), null, '— sin ruta —');
-}
+function totalFichaViaje() { $('#v-total').textContent = eur(CONCEPTOS.reduce((a, [k]) => a + (leerNum($('#v-' + k).value) || 0), 0)); }
 async function guardarViaje(id) {
   const reg = {
-    fecha: val('v-fecha'), cliente_id: val('v-cliente'), ruta_id: val('v-ruta'), conductor_id: val('v-conductor'),
-    tractora_id: val('v-tractora'), num_paradas: Number(val('v-paradas') || 0), precio_manual: val('v-precio'),
-    albaranes: val('v-albaranes') ? val('v-albaranes').split(',').map((s) => s.trim()).filter(Boolean) : null,
-    km: val('v-km'), estado: val('v-estado'), notas: val('v-notas')
+    fecha: val('v-fecha'), num_expedicion: val('v-exp'), cliente_id: val('v-cliente'), conductor_id: val('v-conductor'),
+    tractora_id: val('v-tractora'), km: val('v-km'), estado: val('v-estado'), notas: val('v-notas')
   };
-  if (!reg.fecha || !reg.cliente_id) return aviso('Fecha y cliente son obligatorios', true);
+  if (!reg.fecha) return aviso('La fecha es obligatoria', true);
+  for (const [k, t] of CONCEPTOS) {
+    const n = leerNum($('#v-' + k).value);
+    if (Number.isNaN(n)) return aviso(`${t}: importe no válido`, true);
+    reg[k] = n;
+  }
+  const det = lineas($('#v-detalle').value); const alb = lineas($('#v-albaranes').value);
+  while (det.length && !det[det.length - 1]) det.pop();
+  while (alb.length && !alb[alb.length - 1]) alb.pop();
+  reg.detalle_clientes = det.length ? det : null;
+  reg.albaranes = alb.some(Boolean) ? alb : null;
+  const nombreRuta = val('v-ruta');
+  if (nombreRuta) {
+    let r = editarViaje.rutas.find((x) => x.nombre.toLowerCase() === nombreRuta.toLowerCase());
+    if (!r) r = await q(db().from('rutas').insert({ nombre: nombreRuta, cliente_id: reg.cliente_id }).select('id').single());
+    reg.ruta_id = r.id;
+  } else reg.ruta_id = null;
   if (id) await q(db().from('viajes').update(reg).eq('id', id));
-  else id = (await q(db().from('viajes').insert(reg).select('id').single())).id;
+  else await q(db().from('viajes').insert(reg));
   aviso('Viaje guardado'); cerrarModal(); pintar();
 }
 async function borrarViaje(id) { if (!confirm('¿Borrar este viaje?')) return; await q(db().from('viajes').delete().eq('id', id)); cerrarModal(); pintar(); }
-async function anadirExtra(viajeId) {
-  await q(db().from('viaje_extras').insert({ viaje_id: viajeId, tipo: val('x-tipo'), descripcion: val('x-desc'), cantidad: Number(val('x-cant') || 1), precio_manual: val('x-precio') }));
-  editarViaje(viajeId);
-}
-async function borrarExtra(id, viajeId) { await q(db().from('viaje_extras').delete().eq('id', id)); editarViaje(viajeId); }
 
-/* ---------------------------------------------------------------- RUTAS Y TARIFAS */
-const fRutas = { ver: 'sin_asignar', buscar: '' };
-async function pRutas() {
-  const todas = await q(db().from('v_rutas').select('*').order('viajes_tc', { ascending: false }));
-  const principales = todas.filter((r) => !r.agrupar_en && !r.ignorar).sort((a, b) => a.nombre.localeCompare(b.nombre));
-  let lista = todas;
-  if (fRutas.ver === 'sin_asignar') lista = todas.filter((r) => !r.cliente_id && !r.agrupar_en && !r.ignorar);
-  if (fRutas.ver === 'asignadas') lista = todas.filter((r) => (r.cliente_id || r.agrupar_en) && !r.ignorar);
-  if (fRutas.ver === 'ignoradas') lista = todas.filter((r) => r.ignorar);
-  if (fRutas.buscar) lista = lista.filter((r) => r.nombre.toLowerCase().includes(fRutas.buscar.toLowerCase()));
-  const nTar = await q(db().from('tarifas').select('ruta_id').not('ruta_id', 'is', null));
-  const conTarifa = new Set(nTar.map((t) => t.ruta_id));
-  $('#pagina').innerHTML = `
-  <h1>Rutas y tarifas</h1>
-  <p class="ayuda">Las rutas salen solas de TransControl. Para cada una elige su <b>cliente</b> y ponle <b>tarifa</b>.
-  Si es una errata o variante de otra (p. ej. «STEF ALCALS»), usa <b>«Es la misma que…»</b> y se facturará con la principal.
-  Las rutas de prueba márcalas como <b>Ignorar</b>. Después pulsa «Importar de TransControl» en Viajes.</p>
-  ${S.clientes.length ? '' : '<div class="alerta ambar">Primero crea los clientes (Lactalis, STEF…) en la pestaña Clientes.</div>'}
-  <div class="barra">
-    <div class="campo"><label>Ver</label><select id="fr-ver">${[['sin_asignar', 'Sin asignar'], ['asignadas', 'Asignadas'], ['ignoradas', 'Ignoradas'], ['', 'Todas']].map(([k, t]) => `<option value="${k}" ${fRutas.ver === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-    <div class="campo"><label>Buscar</label><input id="fr-buscar" value="${esc(fRutas.buscar)}" placeholder="RUTA 30…"></div>
-    <button onclick="nuevaRuta()">+ Ruta manual</button>
-  </div>
-  <div class="tabla-wrap"><table>
-    <tr><th>Ruta</th><th class="num">Viajes en TC</th><th>Cliente</th><th>Es la misma que…</th><th>Ignorar</th><th>Tarifa</th></tr>
-    ${lista.map((r) => `<tr>
-      <td><b>${esc(r.nombre)}</b>${r.nombre_transcontrol && r.nombre_transcontrol !== r.nombre ? `<br><small>${esc(r.nombre_transcontrol)}</small>` : ''}</td>
-      <td class="num">${r.viajes_tc ?? ''}</td>
-      <td><select onchange="cambiarRuta('${r.id}','cliente_id',this.value)" ${r.agrupar_en || r.ignorar ? 'disabled' : ''}>${opciones(S.clientes, r.cliente_id, '— sin cliente —')}</select></td>
-      <td><select onchange="cambiarRuta('${r.id}','agrupar_en',this.value)" ${r.ignorar ? 'disabled' : ''}>${opciones(principales.filter((p) => p.id !== r.id), r.agrupar_en, '— no, es principal —')}</select></td>
-      <td><input type="checkbox" style="width:auto" ${r.ignorar ? 'checked' : ''} onchange="cambiarRuta('${r.id}','ignorar',this.checked)"></td>
-      <td>${r.cliente_id && !r.agrupar_en && !r.ignorar ? `<button class="${conTarifa.has(r.id) ? 'sec' : ''} peq" onclick="tarifasRuta('${r.id}')">${conTarifa.has(r.id) ? 'Ver tarifa' : 'Poner tarifa'}</button>` : ''}</td>
-    </tr>`).join('')}
-  </table>${lista.length ? '' : '<div class="vacio">No hay rutas en esta vista.</div>'}</div>`;
-  $('#fr-ver').onchange = (e) => { fRutas.ver = e.target.value; pRutas(); };
-  $('#fr-buscar').oninput = (e) => { fRutas.buscar = e.target.value; clearTimeout(pRutas.t); pRutas.t = setTimeout(() => { pRutas().then(() => { const b = $('#fr-buscar'); b.focus(); b.setSelectionRange(b.value.length, b.value.length); }); }, 350); };
-}
-async function cambiarRuta(id, campo, valor) {
-  const cambio = { [campo]: valor === '' ? null : valor };
-  if (campo === 'agrupar_en' && valor) cambio.cliente_id = null;
-  await q(db().from('rutas').update(cambio).eq('id', id));
-  aviso('Ruta actualizada'); pRutas();
-}
-function nuevaRuta() {
-  modal(`<h1>Nueva ruta</h1><p class="ayuda">Para servicios que no pasan por TransControl.</p>
-  <label>Nombre</label><input id="r-nombre" placeholder="Madrid – Vitoria">
-  <label>Cliente</label><select id="r-cliente">${opciones(S.clientes)}</select>
-  <div class="acciones"><button class="sec" onclick="cerrarModal()">Cancelar</button><button onclick="guardarRutaNueva()">Crear</button></div>`);
-}
-async function guardarRutaNueva() {
-  if (!val('r-nombre') || !val('r-cliente')) return aviso('Nombre y cliente son obligatorios', true);
-  await q(db().from('rutas').insert({ nombre: val('r-nombre'), cliente_id: val('r-cliente') }));
-  cerrarModal(); fRutas.ver = 'asignadas'; pRutas();
-}
-
-async function tarifasRuta(rutaId) {
-  const r = await q(db().from('rutas').select('*').eq('id', rutaId).single());
-  const cli = S.clientes.find((c) => c.id === r.cliente_id);
-  const [propias, generales] = await Promise.all([
-    q(db().from('tarifas').select('*').eq('ruta_id', rutaId).order('tipo').order('vigente_desde', { ascending: false })),
-    q(db().from('tarifas').select('*').eq('cliente_id', r.cliente_id).is('ruta_id', null).order('tipo').order('vigente_desde', { ascending: false }))
-  ]);
-  modal(`<h1>Tarifa · ${esc(r.nombre)}</h1>
-  <p class="ayuda">Cliente: <b>${esc(cli?.nombre)}</b>. Si cambia un precio, añade uno nuevo con su fecha «Desde»: los viajes anteriores mantienen el precio antiguo.</p>
-  ${tablaTarifas(propias, `tarifasRuta('${rutaId}')`)}
-  ${formTarifa(`guardarTarifa('${r.cliente_id}','${rutaId}')`, ['viaje', 'parada', 'hora_espera', 'festivo', 'otro'])}
-  <h2>Tarifas generales de ${esc(cli?.nombre)} (valen para todas sus rutas)</h2>
-  ${generales.length ? tablaTarifas(generales, null) : '<p class="ayuda">No tiene. Se ponen en Clientes.</p>'}
-  <div class="acciones"><button onclick="cerrarModal();pRutas()">Hecho</button></div>`);
-}
+/* ---------------------------------------------------------------- TARIFAS (solo recargo de gasoil por cliente) */
 function tablaTarifas(lista, recargar) {
   if (!lista.length) return '<p class="ayuda">Todavía no hay precios.</p>';
   return `<div class="tabla-wrap"><table><tr><th>Concepto</th><th class="num">Precio</th><th>Desde</th><th>Hasta</th><th></th></tr>
@@ -365,16 +413,15 @@ function tablaTarifas(lista, recargar) {
 function formTarifa(accion, tipos) {
   return `<div class="barra" style="margin-top:12px">
     <div class="campo"><label>Concepto</label><select id="t-tipo">${tipos.map((t) => `<option value="${t}">${TIPOS_TARIFA[t]}</option>`).join('')}</select></div>
-    <div class="campo"><label>Precio (€ o %)</label><input type="number" step="0.01" id="t-precio"></div>
+    <div class="campo"><label>Porcentaje (%)</label><input type="number" step="0.01" id="t-precio"></div>
     <div class="campo"><label>Desde</label><input type="date" id="t-desde" value="2026-01-01"></div>
     <div class="campo"><label>Nota</label><input id="t-desc" placeholder="opcional"></div>
-    <button onclick="${accion}">Añadir precio</button></div>`;
+    <button onclick="${accion}">Añadir</button></div>`;
 }
-async function guardarTarifa(clienteId, rutaId) {
-  if (val('t-precio') == null) return aviso('Pon el precio', true);
-  await q(db().from('tarifas').insert({ cliente_id: clienteId, ruta_id: rutaId || null, tipo: val('t-tipo'), precio: val('t-precio'), vigente_desde: val('t-desde') || hoy(), descripcion: val('t-desc') }));
-  aviso('Precio añadido');
-  rutaId ? tarifasRuta(rutaId) : editarCliente(clienteId);
+async function guardarTarifa(clienteId) {
+  if (val('t-precio') == null) return aviso('Pon el porcentaje', true);
+  await q(db().from('tarifas').insert({ cliente_id: clienteId, ruta_id: null, tipo: val('t-tipo'), precio: val('t-precio'), vigente_desde: val('t-desde') || hoy(), descripcion: val('t-desc') }));
+  aviso('Recargo añadido'); editarCliente(clienteId);
 }
 async function borrarTarifa(id, recargar) { if (!confirm('¿Borrar este precio?')) return; await q(db().from('tarifas').delete().eq('id', id)); eval(recargar); }
 
@@ -393,7 +440,7 @@ async function pClientes() {
 }
 async function editarCliente(id) {
   const c = id ? await q(db().from('clientes').select('*').eq('id', id).single()) : { dias_vencimiento: 60, forma_pago: 'Transferencia', agrupar_facturas: 'mensual' };
-  const tar = id ? await q(db().from('tarifas').select('*').eq('cliente_id', id).is('ruta_id', null).order('tipo').order('vigente_desde', { ascending: false })) : [];
+  const tar = id ? await q(db().from('tarifas').select('*').eq('cliente_id', id).is('ruta_id', null).eq('tipo', 'recargo_gasoil_pct').order('vigente_desde', { ascending: false })) : [];
   const campo = (k, t, tipo = 'text') => `<div><label>${t}</label><input id="c-${k}" type="${tipo}" value="${esc(c[k])}"></div>`;
   modal(`<h1>${id ? esc(c.nombre) : 'Nuevo cliente'}</h1>
   <div class="rejilla">
@@ -404,10 +451,10 @@ async function editarCliente(id) {
   </div>
   <label>Notas</label><textarea id="c-notas">${esc(c.notas)}</textarea>
   <div class="acciones"><button class="sec" onclick="cerrarModal()">Cerrar</button><button onclick="guardarCliente(${id ? `'${id}'` : ''})">Guardar cliente</button></div>
-  ${id ? `<h2>Tarifas generales del cliente</h2>
-  <p class="ayuda">Valen para todas sus rutas salvo que la ruta tenga su propio precio. Típico: precio por parada, hora de espera, festivo y recargo de gasoil (%).</p>
+  ${id ? `<h2>Recargo de gasoil</h2>
+  <p class="ayuda">Opcional. Si el cliente paga un % de recargo de gasoil, se añade al final de cada prefactura sobre la suma de los importes de ruta.</p>
   ${tablaTarifas(tar, `editarCliente('${id}')`)}
-  ${formTarifa(`guardarTarifa('${id}',null)`, ['parada', 'hora_espera', 'festivo', 'recargo_gasoil_pct', 'viaje', 'otro'])}` : ''}`);
+  ${formTarifa(`guardarTarifa('${id}')`, ['recargo_gasoil_pct'])}` : ''}`);
 }
 async function guardarCliente(id) {
   const reg = {};
@@ -448,7 +495,7 @@ async function pFacturas() {
 function nuevaPrefactura() {
   if (!S.empresa) return aviso('Primero rellena los datos de la empresa', true);
   modal(`<h1>Nueva prefactura</h1>
-  <p class="ayuda">Junta en un borrador todos los viajes sin facturar del cliente en ese periodo, con sus paradas, extras y recargos. Puedes revisarlo antes de emitir.</p>
+  <p class="ayuda">Junta en un borrador todos los viajes sin facturar del cliente en ese periodo: importe de ruta, manipulación, retornos, paralizaciones y peajes. Puedes revisarlo antes de emitir.</p>
   <label>Cliente</label><select id="n-cliente">${opciones(S.clientes)}</select>
   <div class="rejilla"><div><label>Desde</label><input type="date" id="n-desde" value="${inicioMes(mesAnterior())}"></div>
   <div><label>Hasta</label><input type="date" id="n-hasta" value="${mesAnterior()}"></div></div>
@@ -547,7 +594,7 @@ function registrarCobro(id, pendiente) {
   modal(`<h1>Registrar cobro</h1>
   <div class="rejilla"><div><label>Fecha</label><input type="date" id="co-fecha" value="${hoy()}"></div>
   <div><label>Importe</label><input type="number" step="0.01" id="co-importe" value="${Number(pendiente).toFixed(2)}"></div>
-  <div><label>Medio</label><select id="co-medio"><option>Transferencia</option><option>Confirming</option><option>Pagaré</option><option>Recibo</option><option>Efectivo</option><option>Compensación litigio</option></select></div></div>
+  <div><label>Medio</label><select id="co-medio"><option>Transferencia</option><option>Confirming</option><option>Pagaré</option><option>Recibo</option><option>Efectivo</option></select></div></div>
   <label>Notas</label><input id="co-notas">
   <div class="acciones"><button class="sec" onclick="cerrarModal()">Cancelar</button><button onclick="guardarCobro('${id}')">Guardar</button></div>`);
 }
@@ -782,7 +829,7 @@ async function sincronizarConductores() {
 }
 async function editarConductor(id, pestana = 'ficha') {
   const c = id ? await q(db().from('conductores').select('*').eq('id', id).single()) : { activo: true };
-  const tabs = id ? [['ficha', 'Ficha'], ['documentos', 'Documentos'], ...Object.entries(SUBCOND).map(([k, x]) => [k, x.titulo]), ['incidencias', 'Incidencias']] : [['ficha', 'Ficha']];
+  const tabs = id ? [['ficha', 'Ficha'], ['documentos', 'Documentos'], ...Object.entries(SUBCOND).map(([k, x]) => [k, x.titulo])] : [['ficha', 'Ficha']];
   let cuerpo = '';
   if (pestana === 'ficha') {
     const campo = (k, t, tipo = 'text') => `<div><label>${t}</label><input id="cd-${k}" type="${tipo}" value="${esc(c[k])}"></div>`;
@@ -792,10 +839,6 @@ async function editarConductor(id, pestana = 'ficha') {
       ${c.tc_conductor_id ? '<p class="ayuda">Vinculado a TransControl: el nombre se actualiza desde allí.</p>' : ''}
       <label>Notas</label><textarea id="cd-notas">${esc(c.notas)}</textarea>
       <div class="acciones"><button class="sec" onclick="cerrarModal();pConductores()">Cerrar</button><button onclick="guardarConductor(${id ? `'${id}'` : ''})">Guardar ficha</button></div>`;
-  } else if (pestana === 'incidencias') {
-    const inc = await q(db().from('v_incidencias').select('*').eq('conductor_id', id).order('fecha', { ascending: false }).limit(300));
-    cuerpo = `${tablaIncidencias(inc, false)}
-    <div class="acciones"><button onclick="editarIncidencia(null,{conductor_id:'${id}'})">+ Incidencia de este conductor</button></div>`;
   } else if (pestana === 'documentos') {
     const docs = await q(db().from('conductor_documentos').select('*').eq('conductor_id', id).order('renovado').order('fecha_vencimiento'));
     cuerpo = `${tablaVencimientos(docs, TIPOS_DOC, 'conductor_documentos', `editarConductor('${id}','documentos')`)}
@@ -892,7 +935,7 @@ async function pGastos() {
       <td>${g.archivo_url ? enlaceArchivo(g.archivo_url) : et('ambar', 'Falta')}</td><td>${g.pagado ? et('verde', 'Pagado') : et('gris', 'Pendiente')}</td></tr>`).join('')}
   </table>${lista.length ? '' : '<div class="vacio">No hay gastos este mes.</div>'}</div>
   ${mats.length ? `<h2>Rentabilidad por camión · ${mesTexto(fGastos.mes)}</h2>
-  <p class="ayuda">Ingresos según tarifas de los viajes con ese camión asignado, menos sus gastos del mes.</p>
+  <p class="ayuda">Ingresos según los importes de los viajes con ese camión asignado, menos sus gastos del mes.</p>
   <div class="tabla-wrap"><table><tr><th>Camión</th><th class="num">Viajes</th><th class="num">Ingresos</th><th class="num">Gasoil</th><th class="num">Litros</th><th class="num">Mantenimiento</th><th class="num">Gastos totales</th><th class="num">Resultado</th></tr>
   ${mats.map((m) => { const c = costes.find((x) => x.matricula === m) || {}; const i = ingresos.find((x) => x.matricula === m) || {}; const r = Number(i.ingreso_estimado || 0) - Number(c.gasto_total || 0);
     return `<tr><td><b>${esc(m)}</b></td><td class="num">${i.viajes || 0}</td><td class="num">${eur(i.ingreso_estimado)}</td><td class="num">${eur(c.gasoil)}</td><td class="num">${num(c.litros, 0)}</td>
@@ -1050,328 +1093,6 @@ async function marcarEnviado() {
   const ini = fGest.mes + '-01';
   await q(db().from('gastos').update({ enviado_gestoria_mes: ini }).gte('fecha', ini).lte('fecha', finMes(ini)));
   aviso('Marcado como enviado'); pGestoria();
-}
-
-
-/* ---------------------------------------------------------------- ARCHIVOS VARIOS (incidencias / litigios) */
-async function subirArchivos(inputId, carpeta) {
-  const files = [...(document.getElementById(inputId)?.files || [])];
-  const rutas = [];
-  for (const file of files) {
-    if (file.size > 10 * 1024 * 1024) { aviso(`«${file.name}» pesa más de 10 MB`, true); throw new Error('grande'); }
-    const limpio = file.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w.\-]+/g, '_').slice(-80);
-    const ruta = `${carpeta}/${Date.now()}_${rutas.length}_${limpio}`;
-    await q(sb.storage.from(BUCKET).upload(ruta, file, { contentType: file.type || undefined }));
-    rutas.push(ruta);
-  }
-  return rutas;
-}
-const enlacesArchivos = (rutas) => (rutas || []).map((r, i) => `<a href="javascript:void 0" onclick="event.stopPropagation();verArchivo('${esc(r)}')">📎 ${i + 1}</a>`).join(' ');
-const campoArchivos = (id, actuales) => `<div><label>Fotos / documentos ${actuales?.length ? '(ya tiene: ' + enlacesArchivos(actuales) + ')' : ''}</label><input type="file" id="${id}" accept="application/pdf,image/*" multiple></div>`;
-const MOTOR = ['tractora', 'rigido', 'furgoneta'];
-const camiones = () => S.vehiculos.filter((v) => MOTOR.includes(v.tipo));
-const remolques = () => S.vehiculos.filter((v) => !MOTOR.includes(v.tipo));
-const selVeh = (lista, sel) => opciones(lista, sel, '—', (x) => x.matricula);
-
-/* ---------------------------------------------------------------- INCIDENCIAS */
-const TIPOS_INC = { averia: 'Avería / rotura', accidente: 'Accidente / golpe', no_se_presenta: 'No va a trabajar', retraso: 'Retraso / se queda dormido', ruta_no_realizada: 'Ruta que no sale', temperatura: 'Problema de frío', multa: 'Multa / sanción', queja_cliente: 'Queja del cliente', otro: 'Otro' };
-const RESPONSABLE = { por_determinar: 'Por determinar', conductor: 'Conductor', empresa: 'Empresa', tercero: 'Un tercero', cliente: 'El cliente', ninguna: 'Nadie (fortuito)' };
-const ESTADO_INC = { abierta: ['rojo', 'Abierta'], en_curso: ['ambar', 'En curso'], cerrada: ['verde', 'Cerrada'] };
-const fInc = { estado: 'abiertas', desde: sumarDias(hoy(), -90), hasta: hoy(), tipo: '', conductor: '', vehiculo: '' };
-
-function tablaIncidencias(lista, conConductor = true) {
-  if (!lista.length) return '<div class="tabla-wrap"><div class="vacio">No hay incidencias.</div></div>';
-  return `<div class="tabla-wrap"><table>
-  <tr><th>Fecha</th><th>Tipo</th>${conConductor ? '<th>Conductor</th>' : ''}<th>Vehículo</th><th>Ruta / cliente</th><th>Qué ha pasado</th><th>Culpa</th><th class="num">Coste</th><th>Estado</th></tr>
-  ${lista.map((i) => { const [c, t] = ESTADO_INC[i.estado] || ['gris', i.estado]; const d = i.descripcion || ''; return `<tr class="clic" onclick="editarIncidencia('${i.id}')">
-    <td style="white-space:nowrap">${fecha(i.fecha)}${i.hora ? ' ' + i.hora.slice(0, 5) : ''}</td><td>${esc(TIPOS_INC[i.tipo] || i.tipo)}</td>
-    ${conConductor ? `<td>${esc(i.conductor_nombre)}</td>` : ''}
-    <td>${esc([i.matricula, i.remolque_matricula].filter(Boolean).join(' + '))}${i.vehiculo_parado_desde && !i.vehiculo_parado_hasta ? ' ' + et('rojo', 'Parado') : ''}</td>
-    <td>${esc([i.ruta_nombre, i.cliente_nombre].filter(Boolean).join(' · '))}</td>
-    <td>${esc(d.slice(0, 90))}${d.length > 90 ? '…' : ''}${i.num_litigios ? ' ' + et('azul', 'Litigio') : ''}</td>
-    <td>${i.responsabilidad === 'conductor' ? et('rojo', 'Conductor') : esc(RESPONSABLE[i.responsabilidad])}</td>
-    <td class="num">${i.coste != null ? eur(i.coste) : ''}</td><td>${et(c, t)}</td></tr>`; }).join('')}
-  </table></div>`;
-}
-
-async function pIncidencias() {
-  let qy = db().from('v_incidencias').select('*').order('fecha', { ascending: false }).order('creado_en', { ascending: false }).limit(1000);
-  if (fInc.estado === 'abiertas') qy = qy.neq('estado', 'cerrada');
-  else { qy = qy.gte('fecha', fInc.desde).lte('fecha', fInc.hasta); if (fInc.estado) qy = qy.eq('estado', fInc.estado); }
-  if (fInc.tipo) qy = qy.eq('tipo', fInc.tipo);
-  if (fInc.conductor) qy = qy.eq('conductor_id', fInc.conductor);
-  if (fInc.vehiculo) qy = qy.or(`vehiculo_id.eq.${fInc.vehiculo},remolque_id.eq.${fInc.vehiculo}`);
-  const [lista, periodo] = await Promise.all([
-    q(qy),
-    q(db().from('v_incidencias').select('conductor_id,conductor_nombre,tipo,aviso_previo,responsabilidad,coste').not('conductor_id', 'is', null).gte('fecha', fInc.desde).lte('fecha', fInc.hasta))
-  ]);
-  const res = {};
-  periodo.forEach((i) => {
-    const r = (res[i.conductor_id] ||= { nombre: i.conductor_nombre, total: 0, faltas: 0, sinAviso: 0, retrasos: 0, danos: 0, culpa: 0, coste: 0 });
-    r.total++;
-    if (i.tipo === 'no_se_presenta') { r.faltas++; if (i.aviso_previo === false) r.sinAviso++; }
-    if (i.tipo === 'retraso') r.retrasos++;
-    if (['averia', 'accidente'].includes(i.tipo)) r.danos++;
-    if (i.responsabilidad === 'conductor') { r.culpa++; r.coste += Number(i.coste || 0); }
-  });
-  const filas = Object.values(res).sort((a, b) => b.total - a.total);
-  $('#pagina').innerHTML = `
-  <h1>Incidencias</h1>
-  <div class="barra">
-    <div class="campo"><label>Ver</label><select id="fi-estado">${[['abiertas', 'Abiertas / en curso'], ['', 'Todas (por fechas)'], ['cerrada', 'Cerradas (por fechas)']].map(([k, t]) => `<option value="${k}" ${fInc.estado === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-    <div class="campo"><label>Desde</label><input type="date" id="fi-desde" value="${fInc.desde}"></div>
-    <div class="campo"><label>Hasta</label><input type="date" id="fi-hasta" value="${fInc.hasta}"></div>
-    <div class="campo"><label>Tipo</label><select id="fi-tipo"><option value="">Todos</option>${Object.entries(TIPOS_INC).map(([k, t]) => `<option value="${k}" ${fInc.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-    <div class="campo"><label>Conductor</label><select id="fi-conductor">${opciones(S.conductores, fInc.conductor, 'Todos')}</select></div>
-    <div class="campo"><label>Vehículo</label><select id="fi-vehiculo">${opciones(S.vehiculos, fInc.vehiculo, 'Todos', (x) => x.matricula)}</select></div>
-    <button onclick="editarIncidencia()">+ Nueva incidencia</button>
-  </div>
-  <p class="ayuda">${fInc.estado === 'abiertas' ? 'Se ven todas las que siguen abiertas, sean de la fecha que sean. ' : ''}Si una incidencia acaba en reclamación del cliente, ábrela y pulsa «Abrir litigio».</p>
-  ${tablaIncidencias(lista)}
-  <h2>Por conductor (${fecha(fInc.desde)} – ${fecha(fInc.hasta)})</h2>
-  ${filas.length ? `<div class="tabla-wrap"><table><tr><th>Conductor</th><th class="num">Total</th><th class="num">No va a trabajar</th><th class="num">De ellas sin avisar</th><th class="num">Retrasos</th><th class="num">Averías / golpes</th><th class="num">Por su culpa</th><th class="num">Coste por su culpa</th></tr>
-  ${filas.map((r) => `<tr><td><b>${esc(r.nombre)}</b></td><td class="num">${r.total}</td><td class="num">${r.faltas || ''}</td><td class="num">${r.sinAviso ? et('rojo', r.sinAviso) : ''}</td><td class="num">${r.retrasos || ''}</td><td class="num">${r.danos || ''}</td><td class="num">${r.culpa || ''}</td><td class="num">${r.coste ? eur(r.coste) : ''}</td></tr>`).join('')}
-  </table></div>` : '<p class="ayuda">Sin incidencias de conductores en estas fechas.</p>'}`;
-  ['estado', 'desde', 'hasta', 'tipo', 'conductor', 'vehiculo'].forEach((k) => { $('#fi-' + k).onchange = (e) => { fInc[k] = e.target.value; pIncidencias(); }; });
-}
-
-async function editarIncidencia(id, pre = {}) {
-  const i = id ? await q(db().from('incidencias').select('*').eq('id', id).single())
-    : { fecha: hoy(), tipo: 'averia', estado: 'abierta', responsabilidad: 'por_determinar', ...pre };
-  if (i.hora) i.hora = i.hora.slice(0, 5);
-  const [rutas, litigios] = await Promise.all([
-    q(db().from('rutas').select('id,nombre').not('cliente_id', 'is', null).order('nombre')),
-    id ? q(db().from('litigios').select('id,referencia_cliente,estado,fecha_apertura').eq('incidencia_id', id)) : Promise.resolve([])
-  ]);
-  editarIncidencia.archivos = i.archivos || [];
-  const sel = (k, obj) => `<select id="in-${k}">${Object.entries(obj).map(([x, t]) => `<option value="${x}" ${i[k] === x ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
-  const inp = (k, tipo = 'text', extra = '') => `<input id="in-${k}" type="${tipo}" value="${esc(i[k])}" ${extra}>`;
-  modal(`<h1>${id ? 'Incidencia del ' + fecha(i.fecha) : 'Nueva incidencia'}</h1>
-  <div class="rejilla">
-    <div><label>Fecha</label>${inp('fecha', 'date')}</div>
-    <div><label>Hora (opcional)</label>${inp('hora', 'time')}</div>
-    <div><label>Tipo</label>${sel('tipo', TIPOS_INC)}</div>
-    <div><label>Estado</label>${sel('estado', Object.fromEntries(Object.entries(ESTADO_INC).map(([k, v]) => [k, v[1]])))}</div>
-    <div><label>Conductor</label><select id="in-conductor_id">${opciones(S.conductores, i.conductor_id, '—')}</select></div>
-    <div><label>Camión</label><select id="in-vehiculo_id">${selVeh(camiones(), i.vehiculo_id)}</select></div>
-    <div><label>Remolque</label><select id="in-remolque_id">${selVeh(remolques(), i.remolque_id)}</select></div>
-    <div><label>Cliente</label><select id="in-cliente_id">${opciones(S.clientes, i.cliente_id, '—')}</select></div>
-    <div><label>Ruta</label><select id="in-ruta_id">${opciones(rutas, i.ruta_id, '—')}</select></div>
-    <div><label>¿Avisó con antelación?</label><select id="in-aviso_previo"><option value="">—</option><option value="si" ${i.aviso_previo === true ? 'selected' : ''}>Sí, avisó</option><option value="no" ${i.aviso_previo === false ? 'selected' : ''}>No avisó</option></select></div>
-    <div><label>Minutos de retraso</label>${inp('minutos_retraso', 'number', 'min="0"')}</div>
-    <div><label>¿De quién es la culpa?</label>${sel('responsabilidad', RESPONSABLE)}</div>
-    <div><label>Coste € (taller, grúa…)</label>${inp('coste', 'number', 'step="0.01"')}</div>
-    <div><label>Vehículo parado desde</label>${inp('vehiculo_parado_desde', 'date')}</div>
-    <div><label>Parado hasta (vacío = sigue parado)</label>${inp('vehiculo_parado_hasta', 'date')}</div>
-    ${campoArchivos('in-archivos', i.archivos)}
-  </div>
-  <label>Qué ha pasado</label><textarea id="in-descripcion" placeholder="Ej.: se rompe el embrague en la A-2; avisa a las 5:10 que no viene…">${esc(i.descripcion)}</textarea>
-  <label>Qué se hizo / solución</label><textarea id="in-solucion" placeholder="Ej.: sale otro conductor con el camión de repuesto; grúa al taller…">${esc(i.solucion)}</textarea>
-  ${litigios.length ? `<h2>Litigios de esta incidencia</h2>${litigios.map((l) => `<div class="alerta ambar">${esc(l.referencia_cliente || 'Litigio')} · ${fecha(l.fecha_apertura)} ${et(FASE[l.estado]?.c || 'gris', FASE[l.estado]?.t || l.estado)}<a style="margin-left:auto;cursor:pointer;text-decoration:underline" onclick="editarLitigio('${l.id}')">Abrir</a></div>`).join('')}` : ''}
-  <div class="acciones">
-    ${id ? `<button class="peligro izq" onclick="borrarIncidencia('${id}')">Borrar</button><button class="sec" onclick="litigioDesdeIncidencia('${id}')">Abrir litigio</button>` : ''}
-    <button class="sec" onclick="cerrarModal()">Cancelar</button><button id="b-inc" onclick="guardarIncidencia(${id ? `'${id}'` : ''})">Guardar</button>
-  </div>`);
-}
-async function guardarIncidencia(id) {
-  const reg = {};
-  ['fecha', 'hora', 'tipo', 'estado', 'conductor_id', 'vehiculo_id', 'remolque_id', 'cliente_id', 'ruta_id', 'minutos_retraso', 'responsabilidad', 'coste',
-    'vehiculo_parado_desde', 'vehiculo_parado_hasta', 'descripcion', 'solucion'].forEach((k) => (reg[k] = val('in-' + k)));
-  const av = val('in-aviso_previo'); reg.aviso_previo = av == null ? null : av === 'si';
-  if (!reg.fecha || !reg.descripcion) return aviso('La fecha y «qué ha pasado» son obligatorios', true);
-  if (reg.vehiculo_parado_hasta && !reg.vehiculo_parado_desde) return aviso('Pon también desde cuándo está parado', true);
-  const b = $('#b-inc'); b.disabled = true;
-  try {
-    const nuevos = await subirArchivos('in-archivos', 'incidencias/' + reg.fecha.slice(0, 7));
-    if (nuevos.length) reg.archivos = [...editarIncidencia.archivos, ...nuevos];
-    if (id) await q(db().from('incidencias').update(reg).eq('id', id));
-    else await q(db().from('incidencias').insert(reg));
-    cerrarModal(); aviso('Incidencia guardada'); pintar();
-  } catch { b.disabled = false; }
-}
-async function borrarIncidencia(id) {
-  if (!confirm('¿Borrar esta incidencia?')) return;
-  await q(db().from('incidencias').delete().eq('id', id)); cerrarModal(); pintar();
-}
-async function litigioDesdeIncidencia(id) {
-  const i = await q(db().from('incidencias').select('*').eq('id', id).single());
-  editarLitigio(null, {
-    incidencia_id: id, cliente_id: i.cliente_id, conductor_id: i.conductor_id, vehiculo_id: i.vehiculo_id, remolque_id: i.remolque_id,
-    ruta_id: i.ruta_id, fecha_servicio: i.fecha, responsabilidad: i.responsabilidad, descripcion: i.descripcion,
-    motivo: { temperatura: 'temperatura', retraso: 'retraso', ruta_no_realizada: 'retraso' }[i.tipo] || 'otro'
-  });
-}
-
-/* ---------------------------------------------------------------- LITIGIOS */
-const MOTIVOS_LIT = { temperatura: 'Temperatura / rotura de frío', mercancia_danada: 'Mercancía dañada', faltante: 'Faltan bultos o palets', retraso: 'Retraso / servicio no realizado', entrega_erronea: 'Entrega errónea', documentacion: 'Documentación / albaranes', otro: 'Otro' };
-// Fases en orden. Se puede saltar de una a cualquier otra.
-const FASES_LIT = [
-  ['abierto', 'Abierto', 'rojo'],
-  ['documentando', 'Reuniendo pruebas', 'ambar'],
-  ['alegado', 'Alegaciones enviadas', 'ambar'],
-  ['cargado', 'Cobrado por el cliente', 'ambar'],
-  ['reclamado_seguro', 'Reclamado al seguro', 'azul'],
-  ['seguro_aceptado', 'Seguro acepta, falta el pago', 'azul'],
-  ['cerrado_recuperado', 'Cerrado · recuperado', 'verde'],
-  ['cerrado_sin_recuperar', 'Cerrado · sin recuperar', 'gris'],
-  ['anulado', 'Anulado (el cliente lo retira)', 'verde']
-];
-const FASE = Object.fromEntries(FASES_LIT.map(([k, t, c]) => [k, { t, c }]));
-const CERRADOS_LIT = ['cerrado_recuperado', 'cerrado_sin_recuperar', 'anulado'];
-const FORMA_CARGO = { descuento_pago: 'Nos lo descuentan del pago de una factura', factura_cargo: 'Nos mandan una factura de cargo', abono: 'Les hacemos una factura rectificativa', otro: 'Otro' };
-const fLit = { ver: 'abiertos', cliente: '', anio: hoy().slice(0, 4) };
-
-function estadoPlazo(d) {
-  const dias = Math.round((new Date(d + 'T12:00:00') - new Date(hoy() + 'T12:00:00')) / 86400000);
-  if (dias < 0) return et('rojo', 'Pasado ' + fecha(d));
-  if (dias <= 7) return et('ambar', fecha(d) + ' (' + (dias === 0 ? 'hoy' : dias + ' d') + ')');
-  return fecha(d);
-}
-
-async function pLitigios() {
-  const ini = fLit.anio + '-01-01'; const fin = fLit.anio + '-12-31';
-  const noCerrado = `(${CERRADOS_LIT.join(',')})`;
-  let qy = db().from('v_litigios').select('*').order('fecha_apertura', { ascending: false }).limit(1000);
-  if (fLit.ver === 'abiertos') qy = qy.not('estado', 'in', noCerrado);
-  else { qy = qy.gte('fecha_apertura', ini).lte('fecha_apertura', fin); if (fLit.ver === 'cerrados') qy = qy.in('estado', CERRADOS_LIT); else if (fLit.ver) qy = qy.eq('estado', fLit.ver); }
-  if (fLit.cliente) qy = qy.eq('cliente_id', fLit.cliente);
-  const [lista, delAnio, abiertos] = await Promise.all([
-    q(qy),
-    q(db().from('v_litigios').select('importe_cargado,importe_recuperado').gte('fecha_apertura', ini).lte('fecha_apertura', fin)),
-    q(db().from('v_litigios').select('importe_reclamado').not('estado', 'in', noCerrado))
-  ]);
-  const s = (l, k) => l.reduce((a, x) => a + Number(x[k] || 0), 0);
-  const cargado = s(delAnio, 'importe_cargado'); const recup = s(delAnio, 'importe_recuperado');
-  $('#pagina').innerHTML = `
-  <h1>Litigios</h1>
-  <div class="barra">
-    <div class="campo"><label>Ver</label><select id="fl2-ver">${[['abiertos', 'Abiertos (todos)'], ['', 'Todos del año'], ['cerrados', 'Cerrados del año'], ...FASES_LIT.map(([k, t]) => [k, 'Fase: ' + t])].map(([k, t]) => `<option value="${k}" ${fLit.ver === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
-    <div class="campo"><label>Cliente</label><select id="fl2-cliente">${opciones(S.clientes, fLit.cliente, 'Todos')}</select></div>
-    <div class="campo"><label>Año</label><input type="number" id="fl2-anio" value="${fLit.anio}" style="width:100px"></div>
-    <button onclick="editarLitigio()">+ Nuevo litigio</button>
-  </div>
-  <div class="kpis">
-    <div class="kpi"><div class="t">Abiertos ahora</div><div class="n">${abiertos.length}</div><div class="t">${eur(s(abiertos, 'importe_reclamado'))} reclamados</div></div>
-    <div class="kpi"><div class="t">Nos han cobrado en ${fLit.anio}</div><div class="n">${eur(cargado)}</div><div class="t">${delAnio.length} litigios abiertos en el año</div></div>
-    <div class="kpi"><div class="t">Recuperado del seguro</div><div class="n" style="color:var(--verde)">${eur(recup)}</div></div>
-    <div class="kpi"><div class="t">Pérdida neta</div><div class="n" style="color:${cargado - recup > 0 ? 'var(--rojo)' : 'inherit'}">${eur(cargado - recup)}</div><div class="t">cobrado − recuperado</div></div>
-  </div>
-  <div class="tabla-wrap"><table>
-    <tr><th>Apertura</th><th>Ref. cliente</th><th>Cliente</th><th>Motivo</th><th>Conductor</th><th class="num">Reclamado</th><th class="num">Cobrado</th><th class="num">Recuperado</th><th>Fase</th><th>Próximo plazo</th></tr>
-    ${lista.map((l) => `<tr class="clic" onclick="editarLitigio('${l.id}')">
-      <td>${fecha(l.fecha_apertura)}</td><td><b>${esc(l.referencia_cliente) || '—'}</b></td><td>${esc(l.cliente_nombre)}</td><td>${esc(MOTIVOS_LIT[l.motivo] || l.motivo)}</td>
-      <td>${esc(l.conductor_nombre)}</td><td class="num">${l.importe_reclamado != null ? eur(l.importe_reclamado) : ''}</td>
-      <td class="num">${l.importe_cargado != null ? eur(l.importe_cargado) : ''}</td><td class="num">${l.importe_recuperado != null ? eur(l.importe_recuperado) : ''}</td>
-      <td>${et(FASE[l.estado]?.c || 'gris', FASE[l.estado]?.t || l.estado)}</td>
-      <td>${l.fecha_limite && !CERRADOS_LIT.includes(l.estado) ? estadoPlazo(l.fecha_limite) + (l.proxima_accion ? '<br><small>' + esc(l.proxima_accion) + '</small>' : '') : ''}</td></tr>`).join('')}
-  </table>${lista.length ? '' : '<div class="vacio">No hay litigios en esta vista.</div>'}</div>`;
-  ['ver', 'cliente', 'anio'].forEach((k) => { $('#fl2-' + k).onchange = (e) => { fLit[k] = e.target.value; pLitigios(); }; });
-}
-
-async function editarLitigio(id, pre = {}) {
-  const l = id ? await q(db().from('litigios').select('*').eq('id', id).single())
-    : { fecha_apertura: hoy(), estado: 'abierto', motivo: 'temperatura', responsabilidad: 'por_determinar', ...pre };
-  const [rutas, facturas, historial, comp] = await Promise.all([
-    q(db().from('rutas').select('id,nombre').not('cliente_id', 'is', null).order('nombre')),
-    q(db().from('facturas').select('id,codigo,cliente_id,fecha').eq('estado', 'emitida').order('fecha', { ascending: false }).limit(300)),
-    id ? q(db().from('litigio_historial').select('*').eq('litigio_id', id).order('fecha', { ascending: false })) : Promise.resolve([]),
-    id ? q(db().from('cobros').select('id,importe,fecha').eq('litigio_id', id)) : Promise.resolve([])
-  ]);
-  editarLitigio.archivos = l.archivos || [];
-  editarLitigio.pre = pre;
-  const inp = (k, t, tipo = 'text', extra = '') => `<div><label>${t}</label><input id="li-${k}" type="${tipo}" value="${esc(l[k])}" ${extra}></div>`;
-  const sel = (k, t, obj, vacio) => `<div><label>${t}</label><select id="li-${k}">${vacio != null ? `<option value="">${vacio}</option>` : ''}${Object.entries(obj).map(([x, tt]) => `<option value="${x}" ${l[k] === x ? 'selected' : ''}>${esc(tt)}</option>`).join('')}</select></div>`;
-  const nomCli = (cid) => (S.clientes.find((c) => c.id === cid) || {}).nombre || '';
-  const perdida = Number(l.importe_cargado || 0) - Number(l.importe_recuperado || 0);
-  const idx = FASES_LIT.findIndex(([k]) => k === l.estado);
-  modal(`<h1>${id ? 'Litigio ' + esc(l.referencia_cliente || '') + ' ' + et(FASE[l.estado]?.c || 'gris', FASE[l.estado]?.t || l.estado) : 'Nuevo litigio'}</h1>
-  ${id ? `<div class="fases">${FASES_LIT.map(([k, t], n) => `<span class="${n === idx ? 'actual' : n < idx ? 'hecha' : ''}">${esc(t)}</span>`).join('')}</div>` : ''}
-  ${l.incidencia_id ? `<p class="ayuda">Viene de una incidencia · <a style="cursor:pointer;text-decoration:underline" onclick="editarIncidencia('${l.incidencia_id}')">ver incidencia</a></p>` : ''}
-  <div class="rejilla">
-    ${inp('fecha_apertura', 'Fecha de apertura', 'date')}${inp('referencia_cliente', 'Nº / referencia del cliente')}
-    <div><label>Cliente</label><select id="li-cliente_id">${opciones(S.clientes, l.cliente_id)}</select></div>
-    ${sel('motivo', 'Motivo', MOTIVOS_LIT)}
-    ${inp('fecha_servicio', 'Fecha del servicio', 'date')}${inp('albaran', 'Albarán / eVoucher')}
-    <div><label>Conductor</label><select id="li-conductor_id">${opciones(S.conductores, l.conductor_id, '—')}</select></div>
-    <div><label>Camión</label><select id="li-vehiculo_id">${selVeh(camiones(), l.vehiculo_id)}</select></div>
-    <div><label>Remolque</label><select id="li-remolque_id">${selVeh(remolques(), l.remolque_id)}</select></div>
-    <div><label>Ruta</label><select id="li-ruta_id">${opciones(rutas, l.ruta_id, '—')}</select></div>
-    ${sel('responsabilidad', '¿De quién es la culpa?', RESPONSABLE)}
-    ${id ? '' : sel('estado', 'Fase en la que está', Object.fromEntries(FASES_LIT.map(([k, t]) => [k, t])))}
-    ${inp('fecha_limite', 'Próximo plazo', 'date')}${inp('proxima_accion', 'Qué hay que hacer antes del plazo', 'text', 'placeholder="Ej.: enviar alegaciones con el registro de temperatura"')}
-  </div>
-  <label>Qué reclama el cliente</label><textarea id="li-descripcion">${esc(l.descripcion)}</textarea>
-  <h2>Lo que nos cobra el cliente</h2>
-  <div class="rejilla">
-    ${inp('importe_reclamado', 'Importe que reclama €', 'number', 'step="0.01"')}${inp('importe_cargado', 'Importe que finalmente nos cobra €', 'number', 'step="0.01"')}
-    ${sel('forma_cargo', 'Cómo nos lo cobra', FORMA_CARGO, '—')}${inp('fecha_cargo', 'Fecha del cobro / descuento', 'date')}
-    <div><label>Factura nuestra afectada</label><select id="li-factura_id">${opciones(facturas, l.factura_id, '—', (f) => f.codigo + ' · ' + nomCli(f.cliente_id) + ' · ' + fecha(f.fecha))}</select></div>
-  </div>
-  ${id && l.forma_cargo === 'descuento_pago' ? (comp.length ? `<p class="ayuda">✓ Descuento de ${eur(comp[0].importe)} registrado en la factura.</p>`
-    : `<p class="ayuda">Si os lo han descontado del pago de una factura, regístralo para que esa factura no se quede como pendiente de cobro. <button class="sec peq" onclick="compensarLitigio('${id}')">Registrar descuento en la factura</button></p>`) : ''}
-  <h2>Seguro</h2>
-  <div class="rejilla">
-    ${inp('aseguradora', 'Aseguradora')}${inp('num_siniestro', 'Nº de siniestro')}${inp('fecha_parte_seguro', 'Fecha del parte', 'date')}
-    ${inp('importe_reclamado_seguro', 'Reclamado al seguro €', 'number', 'step="0.01"')}${inp('franquicia', 'Franquicia €', 'number', 'step="0.01"')}
-    ${inp('importe_recuperado', 'Recuperado del seguro €', 'number', 'step="0.01"')}${inp('fecha_cobro_seguro', 'Fecha de cobro del seguro', 'date')}
-    ${campoArchivos('li-archivos', l.archivos)}
-  </div>
-  ${id ? `<p style="text-align:right;font-size:16px">Pérdida neta: <b style="color:${perdida > 0 ? 'var(--rojo)' : 'var(--verde)'}">${eur(perdida)}</b></p>` : ''}
-  <label>Notas</label><textarea id="li-notas">${esc(l.notas)}</textarea>
-  <div class="acciones">
-    ${id ? `<button class="peligro izq" onclick="borrarLitigio('${id}')">Borrar</button>` : ''}
-    <button class="sec" onclick="cerrarModal()">Cerrar</button><button id="b-lit" onclick="guardarLitigio(${id ? `'${id}'` : ''})">Guardar</button>
-  </div>
-  ${id ? `<h2>Cambiar fase / seguimiento</h2>
-  <div class="barra">
-    <div class="campo"><label>Fase</label><select id="lh-estado">${FASES_LIT.map(([k, t]) => `<option value="${k}" ${k === l.estado ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
-    <div class="campo" style="flex:1"><label>Nota (qué ha pasado, con quién habéis hablado…)</label><input id="lh-nota"></div>
-    <button onclick="cambiarFaseLitigio('${id}')">Guardar en el seguimiento</button>
-  </div>
-  <div class="historial">${historial.map((h) => `<div><span class="f">${new Date(h.fecha).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' })}${h.usuario_nombre ? ' · ' + esc(h.usuario_nombre) : ''}</span>
-    ${h.estado ? et(FASE[h.estado]?.c || 'gris', 'Fase: ' + (FASE[h.estado]?.t || h.estado)) : ''} ${esc(h.nota)}</div>`).join('')}</div>` : ''}`);
-}
-const CAMPOS_LIT = ['fecha_apertura', 'referencia_cliente', 'cliente_id', 'motivo', 'fecha_servicio', 'albaran', 'conductor_id', 'vehiculo_id', 'remolque_id', 'ruta_id',
-  'responsabilidad', 'fecha_limite', 'proxima_accion', 'descripcion', 'importe_reclamado', 'importe_cargado', 'forma_cargo', 'fecha_cargo', 'factura_id',
-  'aseguradora', 'num_siniestro', 'fecha_parte_seguro', 'importe_reclamado_seguro', 'franquicia', 'importe_recuperado', 'fecha_cobro_seguro', 'notas'];
-// seguir = true: guarda sin refrescar (lo usan «cambiar fase» y «registrar descuento»). Devuelve el id o null si falla.
-async function guardarLitigio(id, seguir = false) {
-  const reg = {};
-  CAMPOS_LIT.forEach((k) => (reg[k] = val('li-' + k)));
-  if (!id) { reg.estado = val('li-estado') || 'abierto'; if (editarLitigio.pre?.incidencia_id) reg.incidencia_id = editarLitigio.pre.incidencia_id; }
-  if (!reg.cliente_id || !reg.fecha_apertura) { aviso('Cliente y fecha de apertura son obligatorios', true); return null; }
-  const b = $('#b-lit'); if (b) b.disabled = true;
-  try {
-    const nuevos = await subirArchivos('li-archivos', 'litigios/' + reg.fecha_apertura.slice(0, 7));
-    if (nuevos.length) reg.archivos = [...editarLitigio.archivos, ...nuevos];
-    if (id) await q(db().from('litigios').update(reg).eq('id', id));
-    else id = (await q(db().from('litigios').insert(reg).select('id').single())).id;
-    if (seguir) return id;
-    aviso('Litigio guardado');
-    if (location.hash.startsWith('#litigios')) pLitigios();
-    editarLitigio(id);
-    return id;
-  } catch { if (b) b.disabled = false; return null; }
-}
-async function cambiarFaseLitigio(id) {
-  const estado = val('lh-estado'); const nota = val('lh-nota');
-  if (!(await guardarLitigio(id, true))) return;
-  await q(db().rpc('cambiar_estado_litigio', { p_litigio: id, p_estado: estado, p_nota: nota }));
-  aviso('Seguimiento actualizado');
-  if (location.hash.startsWith('#litigios')) pLitigios();
-  editarLitigio(id);
-}
-async function compensarLitigio(id) {
-  if (!(await guardarLitigio(id, true))) return;
-  const l = await q(db().from('litigios').select('*').eq('id', id).single());
-  if (!l.factura_id || !l.importe_cargado) return aviso('Elige la factura afectada y el importe que os han cobrado', true);
-  if (!confirm(`¿Registrar ${eur(l.importe_cargado)} como descuento en esa factura? Contará como cobrada por compensación.`)) return;
-  await q(db().from('cobros').insert({ factura_id: l.factura_id, fecha: l.fecha_cargo || hoy(), importe: l.importe_cargado, medio: 'Compensación litigio', litigio_id: id, notas: 'Litigio ' + (l.referencia_cliente || '') }));
-  aviso('Descuento registrado en la factura'); editarLitigio(id);
-}
-async function borrarLitigio(id) {
-  if (!confirm('¿Borrar este litigio y todo su seguimiento?')) return;
-  await q(db().from('litigios').delete().eq('id', id)); cerrarModal(); pintar();
 }
 
 
