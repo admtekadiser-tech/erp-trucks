@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v0.2
+/* ERP TRUCKS CROS TRANSPORT · v0.3
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -700,100 +700,256 @@ const mesTexto = (m) => new Date(m + '-15T12:00:00').toLocaleDateString('es-ES',
 
 /* ---------------------------------------------------------------- FLOTA */
 const TIPOS_VEH = { tractora: 'Tractora', rigido: 'Camión rígido', semirremolque: 'Semirremolque', remolque: 'Remolque', furgoneta: 'Furgoneta' };
-const TIPOS_VENC = { itv: 'ITV', seguro: 'Seguro', tacografo: 'Tacógrafo', atp: 'ATP (frigorífico)', revision: 'Revisión / mantenimiento', tarjeta_transporte: 'Tarjeta de transporte', extintores: 'Extintores', otro: 'Otro' };
-const fFlota = { ver: 'activos' };
+const TIPOS_VENC = { itv: 'ITV', seguro: 'Seguro', tacografo: 'Tacógrafo', atp: 'ATP (frigorífico)', revision: 'Revisión / mantenimiento', revision_frio: 'Revisión equipo de frío',
+  tarjeta_transporte: 'Tarjeta de transporte', extintores: 'Extintores', ivtm: 'Impuesto de circulación (IVTM)', otro: 'Otro' };
+// cada cuánto se repite cada vencimiento (meses) — se propone al crear y al renovar
+const PERIODO_VENC = { itv: 12, seguro: 12, tacografo: 24, atp: 72, revision: 12, revision_frio: 12, tarjeta_transporte: 12, extintores: 12, ivtm: 12, otro: 12 };
+const REGIMEN = { propio: 'Propio', leasing: 'Leasing', renting: 'Renting', alquiler: 'Alquiler', financiado: 'Financiado (préstamo)', otro: 'Otro' };
+const REG_COLOR = { propio: 'verde', leasing: 'azul', renting: 'ambar', alquiler: 'ambar', financiado: 'azul', otro: 'gris' };
+const sumarMeses = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setMonth(x.getMonth() + n); return x.toLocaleDateString('sv-SE'); };
+const fFlota = { ver: 'activos', regimen: '' };
 async function pFlota() {
   let qy = db().from('v_vehiculos').select('*').order('tipo').order('matricula');
   qy = fFlota.ver === 'activos' ? qy.is('fecha_baja', null) : qy.not('fecha_baja', 'is', null);
+  if (fFlota.regimen) qy = qy.eq('regimen', fFlota.regimen);
   const lista = await q(qy);
+  const suma = (k) => lista.reduce((a, v) => a + Number(v[k] || 0), 0);
+  const cuotas = lista.filter((v) => v.regimen !== 'propio').reduce((a, v) => a + Number(v.cuota_mensual || 0), 0);
+  const margen = S.empresa?.dias_aviso_vencimientos ?? 30;
+  const proximos = lista.filter((v) => v.proximo_vencimiento && v.proximo_vencimiento <= sumarDias(hoy(), margen)).length;
   $('#pagina').innerHTML = `
   <h1>Flota</h1>
   <div class="barra">
     <div class="campo"><label>Ver</label><select id="fl-ver"><option value="activos" ${fFlota.ver === 'activos' ? 'selected' : ''}>En servicio</option><option value="bajas" ${fFlota.ver === 'bajas' ? 'selected' : ''}>Dados de baja</option></select></div>
+    <div class="campo"><label>Régimen</label><select id="fl-regimen"><option value="">Todos</option>${Object.entries(REGIMEN).map(([k, t]) => `<option value="${k}" ${fFlota.regimen === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
     <button onclick="editarVehiculo()">+ Nuevo vehículo</button>
   </div>
+  <div class="kpis">
+    <div class="kpi"><div class="t">Vehículos</div><div class="n">${lista.length}</div><div class="t">${lista.filter((v) => v.regimen === 'propio').length} propios · ${lista.filter((v) => v.regimen !== 'propio').length} en leasing / renting / otros</div></div>
+    <div class="kpi"><div class="t">Cuotas al mes (sin IVA)</div><div class="n">${eur(cuotas)}</div><div class="t">leasing, renting, alquiler, préstamos</div></div>
+    <div class="kpi"><div class="t">Coste fijo de la flota / mes</div><div class="n">${eur(suma('coste_fijo_mes'))}</div><div class="t">cuotas + amortización + seguros, ITV… prorrateados</div></div>
+    <div class="kpi"><div class="t">Vencimientos próximos</div><div class="n" style="color:${proximos ? 'var(--ambar)' : 'inherit'}">${proximos}</div><div class="t">en los próximos ${margen} días</div></div>
+  </div>
   <div class="tabla-wrap"><table>
-    <tr><th>Matrícula</th><th>Tipo</th><th>Marca / modelo</th><th>Frío</th><th>Próximo vencimiento</th></tr>
-    ${lista.map((v) => `<tr class="clic" onclick="editarVehiculo('${v.id}')"><td><b>${esc(v.matricula)}</b></td><td>${TIPOS_VEH[v.tipo] || v.tipo}</td>
-      <td>${esc([v.marca, v.modelo].filter(Boolean).join(' '))}</td><td>${v.frigorifico ? '❄️' : ''}</td>
+    <tr><th>Matrícula</th><th>Tipo</th><th>Marca / modelo</th><th>Régimen</th><th>Entidad</th><th class="num">Cuota / mes</th><th class="num">Coste fijo / mes</th><th class="num">Km</th><th>Fin contrato</th><th>Próximo vencimiento</th></tr>
+    ${lista.map((v) => `<tr class="clic" onclick="editarVehiculo('${v.id}')"><td><b>${esc(v.matricula)}</b> ${v.frigorifico ? '❄️' : ''}</td><td>${TIPOS_VEH[v.tipo] || v.tipo}</td>
+      <td>${esc([v.marca, v.modelo].filter(Boolean).join(' '))}</td><td>${et(REG_COLOR[v.regimen] || 'gris', REGIMEN[v.regimen] || v.regimen)}</td><td>${esc(v.entidad)}</td>
+      <td class="num">${v.regimen !== 'propio' && v.cuota_mensual != null ? eur(v.cuota_mensual) : ''}</td><td class="num">${Number(v.coste_fijo_mes) ? eur(v.coste_fijo_mes) : ''}</td>
+      <td class="num">${v.km_actuales != null ? num(v.km_actuales, 0) : ''}</td>
+      <td>${v.regimen !== 'propio' && v.contrato_fin ? estadoFecha(v.contrato_fin) : ''}</td>
       <td>${v.proximo_vencimiento ? (TIPOS_VENC[v.proximo_tipo] || v.proximo_tipo) + ' · ' + estadoFecha(v.proximo_vencimiento) : et('gris', 'Sin vencimientos')}</td></tr>`).join('')}
   </table>${lista.length ? '' : '<div class="vacio">No hay vehículos. Pulsa «+ Nuevo vehículo».</div>'}</div>`;
   $('#fl-ver').onchange = (e) => { fFlota.ver = e.target.value; pFlota(); };
+  $('#fl-regimen').onchange = (e) => { fFlota.regimen = e.target.value; pFlota(); };
 }
-async function editarVehiculo(id) {
-  const v = id ? await q(db().from('vehiculos').select('*').eq('id', id).single()) : { tipo: 'tractora', frigorifico: true, fecha_alta: hoy() };
-  const venc = id ? await q(db().from('vehiculo_vencimientos').select('*').eq('vehiculo_id', id).order('renovado').order('fecha_vencimiento')) : [];
-  const campo = (k, t, tipo = 'text') => `<div><label>${t}</label><input id="ve-${k}" type="${tipo}" value="${esc(v[k])}"></div>`;
-  modal(`<h1>${id ? esc(v.matricula) : 'Nuevo vehículo'}</h1>
-  <div class="rejilla">
-    ${campo('matricula', 'Matrícula')}
-    <div><label>Tipo</label><select id="ve-tipo">${Object.entries(TIPOS_VEH).map(([k, t]) => `<option value="${k}" ${v.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-    ${campo('marca', 'Marca')}${campo('modelo', 'Modelo')}${campo('bastidor', 'Nº bastidor')}${campo('fecha_matriculacion', 'Fecha matriculación', 'date')}
-    ${campo('fecha_alta', 'Alta en la empresa', 'date')}${campo('fecha_baja', 'Baja (vendido / retirado)', 'date')}
-    <div><label>Frigorífico</label><input type="checkbox" id="ve-frigorifico" style="width:auto" ${v.frigorifico ? 'checked' : ''}></div>
-  </div>
-  <label>Notas</label><textarea id="ve-notas">${esc(v.notas)}</textarea>
-  <div class="acciones">${id ? `<button class="peligro izq" onclick="borrarVehiculo('${id}')">Borrar</button>` : ''}
-    <button class="sec" onclick="cerrarModal()">Cerrar</button><button onclick="guardarVehiculo(${id ? `'${id}'` : ''})">Guardar</button></div>
-  ${id ? `<h2>Vencimientos</h2>
-  <p class="ayuda">Cuando renueves (nueva ITV, nuevo seguro…) pulsa «Renovar» y pon la nueva fecha: el aviso desaparece y queda el historial.</p>
-  ${tablaVencimientos(venc, TIPOS_VENC, 'vehiculo_vencimientos', `editarVehiculo('${id}')`)}
-  <div class="barra" style="margin-top:12px">
-    <div class="campo"><label>Tipo</label><select id="vv-tipo">${Object.entries(TIPOS_VENC).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select></div>
-    <div class="campo"><label>Vence el</label><input type="date" id="vv-fecha"></div>
-    <div class="campo"><label>Importe (opcional)</label><input type="number" step="0.01" id="vv-importe"></div>
-    <div class="campo"><label>Nota</label><input id="vv-desc" placeholder="Compañía, nº póliza…"></div>
-    ${campoArchivo('vv-archivo')}
-    <button onclick="anadirVencimiento('${id}')">Añadir</button>
-  </div>` : ''}`);
+
+// Campos de la ficha del vehículo, por pestaña: [campo, etiqueta, tipo]
+const CAMPOS_VEH = {
+  ficha: [['matricula', 'Matrícula'], ['tipo', 'Tipo', TIPOS_VEH], ['marca', 'Marca'], ['modelo', 'Modelo'], ['bastidor', 'Nº bastidor'],
+    ['fecha_matriculacion', 'Fecha matriculación', 'date'], ['norma_euro', 'Norma Euro (ZBE)', { '': '—', 'Euro 6': 'Euro 6', 'Euro 5': 'Euro 5', 'Euro 4': 'Euro 4', 'Anterior': 'Anterior' }],
+    ['mma_kg', 'MMA (kg)', 'number'], ['frigorifico', 'Frigorífico', 'checkbox'], ['equipo_frio', 'Equipo de frío (marca / modelo)'], ['horas_equipo_frio', 'Horas equipo de frío', 'number'],
+    ['km_actuales', 'Km actuales', 'number'], ['km_actuales_fecha', 'Km a fecha de', 'date'], ['remolque_habitual_id', 'Remolque habitual', 'remolque'], ['conductor_habitual_id', 'Conductor habitual', 'conductor'],
+    ['tarjeta_gasoil', 'Tarjeta de gasoil (nº)'], ['dispositivo_peaje', 'Dispositivo de peaje (Via-T…)'],
+    ['fecha_alta', 'Alta en la empresa', 'date'], ['fecha_baja', 'Baja (vendido / retirado)', 'date']],
+  contrato: [['regimen', 'Régimen', REGIMEN], ['entidad', 'Entidad (leasing, renting, banco, arrendador)'], ['num_contrato', 'Nº de contrato'],
+    ['contrato_inicio', 'Inicio contrato', 'date'], ['contrato_fin', 'Fin contrato', 'date'], ['cuota_mensual', 'Cuota mensual sin IVA €', 'money'],
+    ['cuota_iva_pct', 'IVA de la cuota %', { 21: '21', 10: '10', 0: '0 (exento)' }], ['dia_cargo', 'Día del cargo en banco', 'number'],
+    ['valor_residual', 'Valor residual / opción de compra €', 'money'], ['km_contratados_anio', 'Km contratados al año (renting)', 'number'],
+    ['precio_km_exceso', 'Precio km de exceso €', 'money'],
+    ['fecha_compra', 'Fecha de compra', 'date'], ['precio_compra', 'Precio de compra sin IVA €', 'money'], ['anios_amortizacion', 'Años para amortizarlo', 'number']]
+};
+// Qué campos del contrato se ven según el régimen
+const VISIBLE_REG = {
+  propio: ['regimen', 'fecha_compra', 'precio_compra', 'anios_amortizacion'],
+  leasing: ['regimen', 'entidad', 'num_contrato', 'contrato_inicio', 'contrato_fin', 'cuota_mensual', 'cuota_iva_pct', 'dia_cargo', 'valor_residual'],
+  renting: ['regimen', 'entidad', 'num_contrato', 'contrato_inicio', 'contrato_fin', 'cuota_mensual', 'cuota_iva_pct', 'dia_cargo', 'km_contratados_anio', 'precio_km_exceso'],
+  alquiler: ['regimen', 'entidad', 'num_contrato', 'contrato_inicio', 'contrato_fin', 'cuota_mensual', 'cuota_iva_pct', 'dia_cargo'],
+  financiado: ['regimen', 'entidad', 'num_contrato', 'contrato_inicio', 'contrato_fin', 'cuota_mensual', 'cuota_iva_pct', 'dia_cargo', 'fecha_compra', 'precio_compra'],
+  otro: null
+};
+function campoVeh(v, [k, t, tipo = 'text']) {
+  const id = 've-' + k;
+  if (tipo === 'checkbox') return `<div><label>${t}</label><input type="checkbox" id="${id}" style="width:auto" ${v[k] ? 'checked' : ''}></div>`;
+  if (tipo === 'remolque') return `<div><label>${t}</label><select id="${id}">${opciones(editarVehiculo.remolques.filter((r) => r.id !== v.id), v[k], '—', (x) => x.matricula)}</select></div>`;
+  if (tipo === 'conductor') return `<div><label>${t}</label><select id="${id}">${opciones(S.conductores, v[k], '—')}</select></div>`;
+  if (typeof tipo === 'object') return `<div><label>${t}</label><select id="${id}" ${k === 'regimen' ? 'onchange="verCamposRegimen()"' : ''}>${Object.entries(tipo).map(([o, txt]) => `<option value="${o}" ${String(v[k] ?? '') === String(o) ? 'selected' : ''}>${txt}</option>`).join('')}</select></div>`;
+  if (tipo === 'money') return `<div data-campo="${k}"><label>${t}</label><input id="${id}" inputmode="decimal" value="${numCampo(v[k])}" oninput="resumenContrato()"></div>`;
+  return `<div data-campo="${k}"><label>${t}</label><input id="${id}" type="${tipo}" value="${esc(v[k])}" ${tipo === 'number' ? 'oninput="resumenContrato()"' : ''}></div>`;
 }
-function tablaVencimientos(lista, tipos, tabla, recargar) {
-  if (!lista.length) return '<p class="ayuda">Sin vencimientos registrados.</p>';
-  return `<div class="tabla-wrap"><table><tr><th>Tipo</th><th>Nota / nº</th><th>Vence</th><th class="num">Importe</th><th>Doc.</th><th></th></tr>
-  ${lista.map((x) => `<tr style="${x.renovado ? 'opacity:.5' : ''}"><td>${esc(tipos[x.tipo] || x.tipo)}</td><td>${esc(x.descripcion ?? x.numero ?? '')}</td>
-    <td>${x.renovado ? fecha(x.fecha_vencimiento) + ' ' + et('gris', 'Renovado') : estadoFecha(x.fecha_vencimiento)}</td>
-    <td class="num">${x.importe != null ? eur(x.importe) : ''}</td><td>${enlaceArchivo(x.archivo_url)}</td>
-    <td style="white-space:nowrap">${x.renovado ? '' : `<button class="peq" onclick="renovar('${tabla}','${x.id}', ${esc(JSON.stringify(recargar))})">Renovar</button>`}
-      <button class="sec peq" onclick="borrarFila('${tabla}','${x.id}', ${esc(JSON.stringify(recargar))})">Quitar</button></td></tr>`).join('')}
-  </table></div>`;
+function verCamposRegimen() {
+  const r = val('ve-regimen'); const vis = VISIBLE_REG[r];
+  CAMPOS_VEH.contrato.forEach(([k]) => { const e = document.getElementById('ve-' + k)?.closest('div'); if (e) e.classList.toggle('oculto', !!vis && !vis.includes(k)); });
+  resumenContrato();
 }
-async function guardarVehiculo(id) {
+function resumenContrato() {
+  const caja = $('#ve-resumen'); if (!caja) return;
+  const r = val('ve-regimen'); const n = (k) => leerNum($('#ve-' + k)?.value) || 0;
+  let txt = '';
+  if (r === 'propio') {
+    const a = n('anios_amortizacion'); txt = a && n('precio_compra') ? `Amortización: <b>${eur(n('precio_compra') / a / 12)}</b> al mes (${eur(n('precio_compra') / a)} al año).` : 'Pon precio de compra y años para calcular la amortización mensual.';
+  } else {
+    const cuota = n('cuota_mensual'); const iva = Number(val('ve-cuota_iva_pct') || 0);
+    const ini = val('ve-contrato_inicio'); const fin = val('ve-contrato_fin');
+    let meses = 0, quedan = 0;
+    if (ini && fin) meses = Math.max(0, Math.round((new Date(fin) - new Date(ini)) / 2629800000));
+    if (fin) quedan = Math.max(0, Math.round((new Date(fin) - new Date(hoy())) / 2629800000));
+    txt = cuota ? `Cuota con IVA: <b>${eur(cuota * (1 + iva / 100))}</b> · al año: <b>${eur(cuota * 12)}</b> sin IVA` : 'Pon la cuota mensual.';
+    if (cuota && meses) txt += ` · total del contrato: ${eur(cuota * meses)} (${meses} meses)`;
+    if (cuota && fin) txt += ` · quedan ${quedan} cuotas (${eur(cuota * quedan)})`;
+    if (r === 'leasing' && n('valor_residual')) txt += ` · opción de compra al final: ${eur(n('valor_residual'))}`;
+  }
+  caja.innerHTML = txt;
+}
+
+async function editarVehiculo(id, pestana = 'ficha') {
+  const v = id ? await q(db().from('v_vehiculos').select('*').eq('id', id).single()) : { tipo: 'tractora', frigorifico: true, fecha_alta: hoy(), regimen: 'propio', cuota_iva_pct: 21 };
+  editarVehiculo.remolques = await q(db().from('vehiculos').select('id,matricula').in('tipo', ['semirremolque', 'remolque']).is('fecha_baja', null).order('matricula'));
+  const tabs = id ? [['ficha', 'Ficha'], ['contrato', 'Régimen y cuota'], ['vencimientos', 'Seguros, ITV y vencimientos'], ['costes', 'Costes']] : [['ficha', 'Ficha']];
+  let cuerpo = '';
+  if (pestana === 'ficha' || pestana === 'contrato') {
+    cuerpo = `<div class="rejilla">${CAMPOS_VEH[pestana].map((c) => campoVeh(v, c)).join('')}</div>
+    ${pestana === 'contrato' ? '<p class="ayuda" id="ve-resumen" style="margin-top:14px"></p>' : '<label>Notas</label><textarea id="ve-notas">' + esc(v.notas) + '</textarea>'}
+    <div class="acciones">${id && pestana === 'ficha' ? `<button class="peligro izq" onclick="borrarVehiculo('${id}')">Borrar</button>` : ''}
+      <button class="sec" onclick="cerrarModal();pFlota()">Cerrar</button><button onclick="guardarVehiculo(${id ? `'${id}'` : 'null'},'${pestana}')">Guardar</button></div>`;
+  } else if (pestana === 'vencimientos') {
+    const venc = await q(db().from('vehiculo_vencimientos').select('*').eq('vehiculo_id', id).order('renovado').order('fecha_vencimiento'));
+    const vigentes = venc.filter((x) => !x.renovado && x.importe != null);
+    const anual = vigentes.reduce((a, x) => a + Number(x.importe) * 12 / (x.periodicidad_meses || 12), 0);
+    cuerpo = `<p class="ayuda">Pulsa <b>Editar</b> para cambiar cualquier dato. Cuando renueves (nueva ITV, nuevo seguro…) pulsa <b>Renovar</b>: se crea el nuevo con la fecha siguiente y el anterior queda en el historial.</p>
+    ${tablaVencimientos(venc, TIPOS_VENC, 'vehiculo_vencimientos', `editarVehiculo('${id}','vencimientos')`)}
+    ${vigentes.length ? `<p style="text-align:right">Coste anual de lo vigente: <b>${eur(anual)}</b> · al mes: <b>${eur(anual / 12)}</b></p>` : ''}
+    <div class="acciones"><button onclick="editarVencimiento('vehiculo_vencimientos', null, ${esc(JSON.stringify(`editarVehiculo('${id}','vencimientos')`))}, '${id}')">+ Añadir seguro, ITV…</button></div>`;
+  } else if (pestana === 'costes') {
+    cuerpo = await costesVehiculo(v);
+  }
+  modal(`<h1>${id ? esc(v.matricula) + ' ' + et(REG_COLOR[v.regimen] || 'gris', REGIMEN[v.regimen] || v.regimen) : 'Nuevo vehículo'}</h1>
+  ${id ? `<div class="barra">${tabs.map(([k, t]) => `<button class="${k === pestana ? '' : 'sec'} peq" onclick="editarVehiculo('${id}','${k}')">${t}</button>`).join('')}</div>` : '<p class="ayuda">Guarda la ficha y después podrás rellenar el régimen, la cuota, los seguros y la ITV.</p>'}
+  ${cuerpo}`);
+  if (pestana === 'contrato') verCamposRegimen();
+}
+async function guardarVehiculo(id, pestana) {
   const reg = {};
-  ['matricula', 'tipo', 'marca', 'modelo', 'bastidor', 'fecha_matriculacion', 'fecha_alta', 'fecha_baja', 'notas'].forEach((k) => (reg[k] = val('ve-' + k)));
-  reg.frigorifico = val('ve-frigorifico');
-  if (!reg.matricula) return aviso('La matrícula es obligatoria', true);
-  reg.matricula = reg.matricula.toUpperCase().replace(/[\s-]+/g, '');
+  for (const [k, t, tipo] of CAMPOS_VEH[pestana]) {
+    const e = document.getElementById('ve-' + k); if (!e) continue;
+    if (tipo === 'checkbox') reg[k] = e.checked;
+    else if (tipo === 'money') { const n = leerNum(e.value); if (Number.isNaN(n)) return aviso(`${t}: importe no válido`, true); reg[k] = n; }
+    else reg[k] = val('ve-' + k);
+  }
+  if (pestana === 'ficha') {
+    reg.notas = val('ve-notas');
+    if (!reg.matricula) return aviso('La matrícula es obligatoria', true);
+    reg.matricula = reg.matricula.toUpperCase().replace(/[\s-]+/g, '');
+  }
+  if (pestana === 'contrato') reg.cuota_iva_pct = Number(reg.cuota_iva_pct ?? 21);
   if (id) await q(db().from('vehiculos').update(reg).eq('id', id));
   else id = (await q(db().from('vehiculos').insert(reg).select('id').single())).id;
-  await recargarMaestros(); aviso('Vehículo guardado'); pFlota(); editarVehiculo(id);
+  await recargarMaestros(); aviso('Vehículo guardado'); editarVehiculo(id, pestana);
 }
 async function borrarVehiculo(id) {
   if (!confirm('¿Borrar el vehículo? Si ya tiene viajes o gastos, mejor ponle fecha de baja.')) return;
   await q(db().from('vehiculos').delete().eq('id', id)); cerrarModal(); await recargarMaestros(); pFlota();
 }
-async function anadirVencimiento(vehId) {
-  if (!val('vv-fecha')) return aviso('Pon la fecha de vencimiento', true);
-  const archivo = await subirArchivo('vv-archivo', 'flota/' + vehId);
-  await q(db().from('vehiculo_vencimientos').insert({ vehiculo_id: vehId, tipo: val('vv-tipo'), fecha_vencimiento: val('vv-fecha'), importe: val('vv-importe'), descripcion: val('vv-desc'), archivo_url: archivo }));
-  aviso('Vencimiento añadido'); editarVehiculo(vehId);
+
+// Pestaña «Costes»: últimos 12 meses de gastos del camión, coste fijo y coste por km
+async function costesVehiculo(v) {
+  const desde = inicioMes(sumarMeses(hoy(), -11));
+  const [gastos, viajes] = await Promise.all([
+    q(db().from('gastos').select('fecha,categoria,base,litros,km_vehiculo').eq('vehiculo_id', v.id).gte('fecha', desde).order('fecha')),
+    q(db().from('viajes').select('fecha,km').eq('tractora_id', v.id).gte('fecha', desde).neq('estado', 'anulado'))
+  ]);
+  const ingresos = await q(db().from('v_ingreso_vehiculo_mes').select('*').eq('matricula', v.matricula).gte('mes', desde));
+  const FIJOS = ['seguro', 'itv', 'tacografo', 'atp', 'financiacion_leasing', 'impuestos_tasas'];
+  const porCat = {}; gastos.forEach((g) => (porCat[g.categoria] = (porCat[g.categoria] || 0) + Number(g.base)));
+  const variable = gastos.filter((g) => !FIJOS.includes(g.categoria)).reduce((a, g) => a + Number(g.base), 0);
+  const meses = Math.max(1, new Set([...gastos, ...viajes].map((x) => x.fecha.slice(0, 7))).size); const fijo = Number(v.coste_fijo_mes || 0) * meses;
+  const lecturas = gastos.map((g) => Number(g.km_vehiculo)).filter(Boolean);
+  const kmLect = lecturas.length > 1 ? Math.max(...lecturas) - Math.min(...lecturas) : 0;
+  const kmViajes = viajes.reduce((a, x) => a + Number(x.km || 0), 0);
+  const km = kmLect || kmViajes;
+  const litros = gastos.reduce((a, g) => a + Number(g.litros || 0), 0);
+  const ingreso = ingresos.reduce((a, x) => a + Number(x.ingreso_estimado || 0), 0);
+  const total = variable + fijo;
+  return `<p class="ayuda">Últimos 12 meses (desde ${fecha(desde)}). El coste fijo es la cuota o amortización más los seguros, ITV… prorrateados; las facturas de seguro, ITV y leasing no se suman otra vez.</p>
+  <div class="kpis">
+    <div class="kpi"><div class="t">Coste fijo / mes</div><div class="n">${eur(v.coste_fijo_mes)}</div><div class="t">${eur(fijo)} en ${meses} ${meses === 1 ? 'mes' : 'meses'} con actividad</div></div>
+    <div class="kpi"><div class="t">Gasto variable 12 meses</div><div class="n">${eur(variable)}</div><div class="t">gasoil, peajes, taller, neumáticos…</div></div>
+    <div class="kpi"><div class="t">Coste por km</div><div class="n">${km ? eur(total / km) : '—'}</div><div class="t">${km ? num(km, 0) + ' km ' + (kmLect ? '(según repostajes)' : '(según viajes)') : 'Pon los km al registrar el gasoil'}</div></div>
+    <div class="kpi"><div class="t">Consumo</div><div class="n">${km && litros ? num(litros / km * 100, 1) + ' l' : '—'}</div><div class="t">litros / 100 km</div></div>
+    <div class="kpi"><div class="t">Resultado (${meses} ${meses === 1 ? 'mes' : 'meses'})</div><div class="n" style="color:${ingreso - total < 0 ? 'var(--rojo)' : 'var(--verde)'}">${eur(ingreso - total)}</div><div class="t">ingresos ${eur(ingreso)} − costes ${eur(total)}</div></div>
+  </div>
+  <div class="tabla-wrap"><table><tr><th>Categoría</th><th class="num">Importe (base)</th></tr>
+    ${Object.entries(porCat).sort((a, b) => b[1] - a[1]).map(([k, x]) => `<tr><td>${CATEGORIAS[k] || k}${FIJOS.includes(k) ? ' <small>(ya incluido en el coste fijo)</small>' : ''}</td><td class="num">${eur(x)}</td></tr>`).join('')}
+  </table>${gastos.length ? '' : '<div class="vacio">No hay gastos asignados a este camión en los últimos 12 meses.</div>'}</div>
+  <div class="acciones"><button class="sec" onclick="cerrarModal();pFlota()">Cerrar</button></div>`;
 }
-async function renovar(tabla, id, recargar) {
-  const nueva = prompt('Nueva fecha de vencimiento (dd/mm/aaaa):');
-  if (!nueva) return;
-  const m = nueva.trim().match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
-  if (!m) return aviso('Escribe la fecha así: 15/03/2027', true);
-  const iso = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  const viejo = await q(db().from(tabla).select('*').eq('id', id).single());
-  const { id: _i, renovado: _r, archivo_url: _a, ...copia } = viejo;
-  await q(db().from(tabla).insert({ ...copia, fecha_vencimiento: iso }));
-  await q(db().from(tabla).update({ renovado: true }).eq('id', id));
-  aviso('Renovado hasta ' + fecha(iso)); eval(recargar);
+
+/* Vencimientos (vehículos y documentos de conductores): tabla, editar, renovar */
+function tablaVencimientos(lista, tipos, tabla, recargar) {
+  if (!lista.length) return '<p class="ayuda">Sin vencimientos registrados.</p>';
+  const veh = tabla === 'vehiculo_vencimientos';
+  const r = esc(JSON.stringify(recargar));
+  return `<div class="tabla-wrap"><table><tr><th>Tipo</th>${veh ? '<th>Compañía / taller</th>' : ''}<th>Nota / nº</th><th>Vence</th>${veh ? '<th class="num">Importe</th><th class="num">Cada</th>' : ''}<th>Doc.</th><th></th></tr>
+  ${lista.map((x) => `<tr style="${x.renovado ? 'opacity:.5' : ''}"><td>${esc(tipos[x.tipo] || x.tipo)}</td>${veh ? `<td>${esc(x.proveedor)}</td>` : ''}<td>${esc(x.descripcion ?? x.numero ?? '')}</td>
+    <td>${x.renovado ? fecha(x.fecha_vencimiento) + ' ' + et('gris', 'Renovado') : estadoFecha(x.fecha_vencimiento)}</td>
+    ${veh ? `<td class="num">${x.importe != null ? eur(x.importe) : ''}</td><td class="num">${x.periodicidad_meses ? x.periodicidad_meses + ' meses' : ''}</td>` : ''}
+    <td>${enlaceArchivo(x.archivo_url)}</td>
+    <td style="white-space:nowrap"><button class="sec peq" onclick="editarVencimiento('${tabla}','${x.id}', ${r})">Editar</button>
+      ${x.renovado ? '' : `<button class="peq" onclick="renovar('${tabla}','${x.id}', ${r})">Renovar</button>`}
+      <button class="sec peq" onclick="borrarFila('${tabla}','${x.id}', ${r})">Quitar</button></td></tr>`).join('')}
+  </table></div>`;
 }
+// Formulario para crear, editar o renovar un vencimiento. modo: 'nuevo' | 'editar' | 'renovar'
+async function editarVencimiento(tabla, id, recargar, padreId, modo) {
+  const veh = tabla === 'vehiculo_vencimientos';
+  const tipos = veh ? TIPOS_VENC : TIPOS_DOC;
+  modo = modo || (id ? 'editar' : 'nuevo');
+  let x = id ? await q(db().from(tabla).select('*').eq('id', id).single()) : { tipo: veh ? 'seguro' : 'carne', periodicidad_meses: 12 };
+  if (modo === 'renovar') x = { ...x, fecha_vencimiento: x.fecha_vencimiento ? sumarMeses(x.fecha_vencimiento, x.periodicidad_meses || PERIODO_VENC[x.tipo] || 12) : '', archivo_url: null };
+  editarVencimiento.ctx = { tabla, id, recargar, padreId: padreId || (veh ? x.vehiculo_id : x.conductor_id), modo };
+  const titulo = { nuevo: 'Nuevo vencimiento', editar: 'Editar ' + (tipos[x.tipo] || ''), renovar: 'Renovar ' + (tipos[x.tipo] || '') }[modo];
+  modal(`<h1>${esc(titulo)}</h1>
+  ${modo === 'renovar' ? '<p class="ayuda">Se crea el nuevo con estos datos (revisa fecha e importe) y el anterior queda como «Renovado» en el historial.</p>' : ''}
+  <div class="rejilla">
+    <div><label>Tipo</label><select id="vx-tipo" ${modo === 'renovar' ? 'disabled' : ''} onchange="periodoPorTipo()">${Object.entries(tipos).map(([k, t]) => `<option value="${k}" ${x.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    ${veh ? `<div><label>Compañía / taller / organismo</label><input id="vx-proveedor" value="${esc(x.proveedor)}" placeholder="Mapfre, ITV Getafe…"></div>
+      <div><label>${'Nº póliza / nota'}</label><input id="vx-desc" value="${esc(x.descripcion)}"></div>`
+    : `<div><label>Número</label><input id="vx-numero" value="${esc(x.numero)}"></div>`}
+    <div><label>Vence el</label><input type="date" id="vx-fecha" value="${x.fecha_vencimiento || ''}"></div>
+    ${veh ? `<div><label>Importe €</label><input id="vx-importe" inputmode="decimal" value="${numCampo(x.importe)}"></div>
+      <div><label>Se repite cada (meses)</label><input type="number" id="vx-periodo" value="${x.periodicidad_meses ?? ''}"></div>` : ''}
+    ${campoArchivo('vx-archivo', modo === 'editar' ? x.archivo_url : null)}
+  </div>
+  <div class="acciones"><button class="sec" onclick="${esc(recargar)}">Cancelar</button><button id="b-venc" onclick="guardarVencimiento()">${modo === 'renovar' ? 'Renovar' : 'Guardar'}</button></div>`);
+}
+function periodoPorTipo() { const p = $('#vx-periodo'); if (p && editarVencimiento.ctx.modo === 'nuevo') p.value = PERIODO_VENC[val('vx-tipo')] || 12; }
+async function guardarVencimiento() {
+  const { tabla, id, recargar, padreId, modo } = editarVencimiento.ctx;
+  const veh = tabla === 'vehiculo_vencimientos';
+  if (!val('vx-fecha')) return aviso('Pon la fecha de vencimiento', true);
+  const reg = { tipo: val('vx-tipo'), fecha_vencimiento: val('vx-fecha') };
+  if (veh) {
+    const imp = leerNum($('#vx-importe').value);
+    if (Number.isNaN(imp)) return aviso('Importe no válido', true);
+    Object.assign(reg, { proveedor: val('vx-proveedor'), descripcion: val('vx-desc'), importe: imp, periodicidad_meses: val('vx-periodo') ? Number(val('vx-periodo')) : null });
+  } else reg.numero = val('vx-numero');
+  $('#b-venc').disabled = true;
+  try {
+    const archivo = await subirArchivo('vx-archivo', (veh ? 'flota/' : 'conductores/') + padreId);
+    if (archivo) reg.archivo_url = archivo;
+    if (modo === 'editar') await q(db().from(tabla).update(reg).eq('id', id));
+    else {
+      reg[veh ? 'vehiculo_id' : 'conductor_id'] = padreId;
+      await q(db().from(tabla).insert(reg));
+      if (modo === 'renovar') await q(db().from(tabla).update({ renovado: true }).eq('id', id));
+    }
+    aviso(modo === 'renovar' ? 'Renovado hasta ' + fecha(reg.fecha_vencimiento) : 'Guardado'); eval(recargar);
+  } catch { const b = $('#b-venc'); if (b) b.disabled = false; }
+}
+function renovar(tabla, id, recargar) { editarVencimiento(tabla, id, recargar, null, 'renovar'); }
 async function borrarFila(tabla, id, recargar) {
   if (!confirm('¿Quitar este registro?')) return;
   await q(db().from(tabla).delete().eq('id', id)); eval(recargar);
 }
-
 /* ---------------------------------------------------------------- CONDUCTORES */
 const TIPOS_DOC = { carne: 'Carné de conducir', cap: 'CAP', tarjeta_tacografo: 'Tarjeta tacógrafo', reconocimiento_medico: 'Reconocimiento médico', adr: 'ADR', otro: 'Otro' };
 const SUBCOND = {
@@ -910,12 +1066,14 @@ async function pGastos() {
   let qy = db().from('gastos').select('*, proveedores(nombre), vehiculos(matricula)').gte('fecha', ini).lte('fecha', fin).order('fecha', { ascending: false });
   if (fGastos.categoria) qy = qy.eq('categoria', fGastos.categoria);
   if (fGastos.vehiculo) qy = qy.eq('vehiculo_id', fGastos.vehiculo);
-  const [lista, costes, ingresos] = await Promise.all([
-    q(qy), q(db().from('v_coste_vehiculo_mes').select('*').eq('mes', ini)), q(db().from('v_ingreso_vehiculo_mes').select('*').eq('mes', ini))
+  const [lista, costes, ingresos, fijos] = await Promise.all([
+    q(qy), q(db().from('v_coste_vehiculo_mes').select('*').eq('mes', ini)), q(db().from('v_ingreso_vehiculo_mes').select('*').eq('mes', ini)),
+    q(db().from('v_vehiculos').select('matricula,coste_fijo_mes').is('fecha_baja', null))
   ]);
+  const fijoDe = (m) => Number((fijos.find((x) => x.matricula === m) || {}).coste_fijo_mes || 0);
   const porCat = {}; lista.forEach((g) => (porCat[g.categoria] = (porCat[g.categoria] || 0) + Number(g.base)));
   const tot = (k) => lista.reduce((a, g) => a + Number(g[k] || 0), 0);
-  const mats = [...new Set([...costes.map((c) => c.matricula), ...ingresos.map((c) => c.matricula)])].sort();
+  const mats = [...new Set([...costes.map((c) => c.matricula), ...ingresos.map((c) => c.matricula), ...fijos.filter((x) => Number(x.coste_fijo_mes)).map((x) => x.matricula)])].sort();
   $('#pagina').innerHTML = `
   <h1>Gastos</h1>
   <div class="barra">
@@ -935,11 +1093,12 @@ async function pGastos() {
       <td>${g.archivo_url ? enlaceArchivo(g.archivo_url) : et('ambar', 'Falta')}</td><td>${g.pagado ? et('verde', 'Pagado') : et('gris', 'Pendiente')}</td></tr>`).join('')}
   </table>${lista.length ? '' : '<div class="vacio">No hay gastos este mes.</div>'}</div>
   ${mats.length ? `<h2>Rentabilidad por camión · ${mesTexto(fGastos.mes)}</h2>
-  <p class="ayuda">Ingresos según los importes de los viajes con ese camión asignado, menos sus gastos del mes.</p>
-  <div class="tabla-wrap"><table><tr><th>Camión</th><th class="num">Viajes</th><th class="num">Ingresos</th><th class="num">Gasoil</th><th class="num">Litros</th><th class="num">Mantenimiento</th><th class="num">Gastos totales</th><th class="num">Resultado</th></tr>
-  ${mats.map((m) => { const c = costes.find((x) => x.matricula === m) || {}; const i = ingresos.find((x) => x.matricula === m) || {}; const r = Number(i.ingreso_estimado || 0) - Number(c.gasto_total || 0);
+  <p class="ayuda">Ingresos de los viajes con ese camión asignado − gastos variables del mes (gasoil, peajes, taller…) − coste fijo mensual (cuota o amortización + seguros, ITV… prorrateados, de la ficha de Flota). Las facturas de seguro, ITV o leasing no se restan dos veces.</p>
+  <div class="tabla-wrap"><table><tr><th>Camión</th><th class="num">Viajes</th><th class="num">Ingresos</th><th class="num">Gasoil</th><th class="num">Litros</th><th class="num">Mantenimiento</th><th class="num">Gasto variable</th><th class="num">Coste fijo</th><th class="num">Resultado</th></tr>
+  ${mats.map((m) => { const c = costes.find((x) => x.matricula === m) || {}; const i = ingresos.find((x) => x.matricula === m) || {}; const f = fijoDe(m);
+    const r = Number(i.ingreso_estimado || 0) - Number(c.gasto_variable || 0) - f;
     return `<tr><td><b>${esc(m)}</b></td><td class="num">${i.viajes || 0}</td><td class="num">${eur(i.ingreso_estimado)}</td><td class="num">${eur(c.gasoil)}</td><td class="num">${num(c.litros, 0)}</td>
-    <td class="num">${eur(c.mantenimiento)}</td><td class="num">${eur(c.gasto_total)}</td><td class="num" style="color:${r < 0 ? 'var(--rojo)' : 'var(--verde)'}"><b>${eur(r)}</b></td></tr>`; }).join('')}
+    <td class="num">${eur(c.mantenimiento)}</td><td class="num">${eur(c.gasto_variable)}</td><td class="num">${eur(f)}</td><td class="num" style="color:${r < 0 ? 'var(--rojo)' : 'var(--verde)'}"><b>${eur(r)}</b></td></tr>`; }).join('')}
   </table></div>` : ''}`;
   ['mes', 'categoria', 'vehiculo'].forEach((k) => { $('#fg-' + k).onchange = (e) => { fGastos[k] = e.target.value; pGastos(); }; });
 }
