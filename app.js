@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v0.4
+/* ERP TRUCKS CROS TRANSPORT · v0.5
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -707,40 +707,96 @@ const PERIODO_VENC = { itv: 12, seguro: 12, tacografo: 24, atp: 72, revision: 12
 const REGIMEN = { propio: 'Propio', leasing: 'Leasing', renting: 'Renting', alquiler: 'Alquiler', financiado: 'Financiado (préstamo)', otro: 'Otro' };
 const REG_COLOR = { propio: 'verde', leasing: 'azul', renting: 'ambar', alquiler: 'ambar', financiado: 'azul', otro: 'gris' };
 const sumarMeses = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setMonth(x.getMonth() + n); return x.toLocaleDateString('sv-SE'); };
-const fFlota = { ver: 'activos', regimen: '' };
+const fFlota = { ver: 'activos', regimen: '', tipo: '', vtipo: '', plazo: '', buscar: '' };
+const PLAZOS = [['', 'Cualquier fecha'], ['vencido', 'Vencidos'], ['30', 'En 30 días o menos'], ['60', 'En 60 días o menos'], ['90', 'En 90 días o menos'], ['ninguno', 'Sin vencimientos']];
 async function pFlota() {
   let qy = db().from('v_vehiculos').select('*').order('tipo').order('matricula');
   qy = fFlota.ver === 'activos' ? qy.is('fecha_baja', null) : qy.not('fecha_baja', 'is', null);
   if (fFlota.regimen) qy = qy.eq('regimen', fFlota.regimen);
-  const lista = await q(qy);
+  if (fFlota.tipo) qy = qy.eq('tipo', fFlota.tipo);
+  const [todos, venc] = await Promise.all([q(qy), q(db().from('vehiculo_vencimientos').select('*').eq('renovado', false).order('fecha_vencimiento'))]);
+  // Vencimientos abiertos de cada vehículo, filtrados por tipo de vencimiento y plazo
+  const hasta = /^\d+$/.test(fFlota.plazo) ? sumarDias(hoy(), Number(fFlota.plazo)) : null;
+  const encaja = (x) => (!fFlota.vtipo || x.tipo === fFlota.vtipo) && (fFlota.plazo === 'vencido' ? x.fecha_vencimiento < hoy() : hasta ? x.fecha_vencimiento <= hasta : true);
+  const porVeh = {}; venc.forEach((x) => (porVeh[x.vehiculo_id] = porVeh[x.vehiculo_id] || []).push(x));
+  let lista = todos.map((v) => ({ ...v, _venc: (porVeh[v.id] || []).filter(encaja) }));
+  if (fFlota.plazo === 'ninguno') lista = lista.filter((v) => !(porVeh[v.id] || []).some((x) => !fFlota.vtipo || x.tipo === fFlota.vtipo));
+  else if (fFlota.plazo || fFlota.vtipo) lista = lista.filter((v) => v._venc.length);
+  if (fFlota.buscar) { const b = fFlota.buscar.toUpperCase().replace(/[\s-]+/g, ''); lista = lista.filter((v) => [v.matricula, v.marca, v.modelo, v.entidad].some((x) => (x || '').toUpperCase().replace(/[\s-]+/g, '').includes(b))); }
+  pFlota.lista = lista; pFlota.venc = porVeh;
   const suma = (k) => lista.reduce((a, v) => a + Number(v[k] || 0), 0);
   const cuotas = lista.filter((v) => v.regimen !== 'propio').reduce((a, v) => a + Number(v.cuota_mensual || 0), 0);
   const margen = S.empresa?.dias_aviso_vencimientos ?? 30;
   const proximos = lista.filter((v) => v.proximo_vencimiento && v.proximo_vencimiento <= sumarDias(hoy(), margen)).length;
+  const sel = (id, k, ops) => `<select id="${id}">${ops.map(([o, t]) => `<option value="${o}" ${fFlota[k] === o ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
+  const filtros = fFlota.regimen || fFlota.tipo || fFlota.vtipo || fFlota.plazo || fFlota.buscar;
   $('#pagina').innerHTML = `
   <h1>Flota</h1>
   <div class="barra">
-    <div class="campo"><label>Ver</label><select id="fl-ver"><option value="activos" ${fFlota.ver === 'activos' ? 'selected' : ''}>En servicio</option><option value="bajas" ${fFlota.ver === 'bajas' ? 'selected' : ''}>Dados de baja</option></select></div>
-    <div class="campo"><label>Régimen</label><select id="fl-regimen"><option value="">Todos</option>${Object.entries(REGIMEN).map(([k, t]) => `<option value="${k}" ${fFlota.regimen === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Ver</label>${sel('fl-ver', 'ver', [['activos', 'En servicio'], ['bajas', 'Dados de baja']])}</div>
+    <div class="campo"><label>Tipo</label>${sel('fl-tipo', 'tipo', [['', 'Todos'], ...Object.entries(TIPOS_VEH)])}</div>
+    <div class="campo"><label>Régimen</label>${sel('fl-regimen', 'regimen', [['', 'Todos'], ...Object.entries(REGIMEN)])}</div>
+    <div class="campo"><label>Vencimiento de</label>${sel('fl-vtipo', 'vtipo', [['', 'Cualquiera (ITV, seguro…)'], ...Object.entries(TIPOS_VENC)])}</div>
+    <div class="campo"><label>Que vence</label>${sel('fl-plazo', 'plazo', PLAZOS)}</div>
+    <div class="campo"><label>Buscar</label><input id="fl-buscar" value="${esc(fFlota.buscar)}" placeholder="Matrícula, marca…"></div>
+  </div>
+  <div class="barra">
     <button onclick="editarVehiculo()">+ Nuevo vehículo</button>
+    <button class="sec" onclick="exportarFlotaExcel()">⬇ Exportar a Excel</button>
+    ${filtros ? `<button class="sec" onclick="Object.assign(fFlota,{regimen:'',tipo:'',vtipo:'',plazo:'',buscar:''});pFlota()">✕ Quitar filtros</button>` : ''}
   </div>
   <div class="kpis">
-    <div class="kpi"><div class="t">Vehículos</div><div class="n">${lista.length}</div><div class="t">${lista.filter((v) => v.regimen === 'propio').length} propios · ${lista.filter((v) => v.regimen !== 'propio').length} en leasing / renting / otros</div></div>
+    <div class="kpi"><div class="t">Vehículos${filtros ? ' (filtrados)' : ''}</div><div class="n">${lista.length}</div><div class="t">${lista.filter((v) => v.regimen === 'propio').length} propios · ${lista.filter((v) => v.regimen !== 'propio').length} en leasing / renting / otros</div></div>
     <div class="kpi"><div class="t">Cuotas al mes (sin IVA)</div><div class="n">${eur(cuotas)}</div><div class="t">leasing, renting, alquiler, préstamos</div></div>
-    <div class="kpi"><div class="t">Coste fijo de la flota / mes</div><div class="n">${eur(suma('coste_fijo_mes'))}</div><div class="t">cuotas + amortización + seguros, ITV… prorrateados</div></div>
+    <div class="kpi"><div class="t">Coste fijo / mes</div><div class="n">${eur(suma('coste_fijo_mes'))}</div><div class="t">cuotas + amortización + seguros, ITV… prorrateados</div></div>
     <div class="kpi"><div class="t">Vencimientos próximos</div><div class="n" style="color:${proximos ? 'var(--ambar)' : 'inherit'}">${proximos}</div><div class="t">en los próximos ${margen} días</div></div>
   </div>
   <div class="tabla-wrap"><table>
-    <tr><th>Matrícula</th><th>Tipo</th><th>Marca / modelo</th><th>Régimen</th><th>Entidad</th><th class="num">Cuota / mes</th><th class="num">Coste fijo / mes</th><th class="num">Km</th><th>Fin contrato</th><th>Próximo vencimiento</th></tr>
+    <tr><th>Matrícula</th><th>Tipo</th><th>Marca / modelo</th><th>Régimen</th><th>Entidad</th><th class="num">Cuota / mes</th><th class="num">Coste fijo / mes</th><th class="num">Km</th><th>Fin contrato</th><th>${fFlota.vtipo || fFlota.plazo ? 'Vencimientos que cumplen el filtro' : 'Próximo vencimiento'}</th></tr>
     ${lista.map((v) => `<tr class="clic" onclick="editarVehiculo('${v.id}')"><td><b>${esc(v.matricula)}</b> ${v.frigorifico ? '❄️' : ''}</td><td>${TIPOS_VEH[v.tipo] || v.tipo}</td>
       <td>${esc([v.marca, v.modelo].filter(Boolean).join(' '))}</td><td>${et(REG_COLOR[v.regimen] || 'gris', REGIMEN[v.regimen] || v.regimen)}</td><td>${esc(v.entidad)}</td>
       <td class="num">${v.regimen !== 'propio' && v.cuota_mensual != null ? eur(v.cuota_mensual) : ''}</td><td class="num">${Number(v.coste_fijo_mes) ? eur(v.coste_fijo_mes) : ''}</td>
       <td class="num">${v.km_actuales != null ? num(v.km_actuales, 0) : ''}</td>
       <td>${v.regimen !== 'propio' && v.contrato_fin ? estadoFecha(v.contrato_fin) : ''}</td>
-      <td>${v.proximo_vencimiento ? (TIPOS_VENC[v.proximo_tipo] || v.proximo_tipo) + ' · ' + estadoFecha(v.proximo_vencimiento) : et('gris', 'Sin vencimientos')}</td></tr>`).join('')}
-  </table>${lista.length ? '' : '<div class="vacio">No hay vehículos. Pulsa «+ Nuevo vehículo».</div>'}</div>`;
-  $('#fl-ver').onchange = (e) => { fFlota.ver = e.target.value; pFlota(); };
-  $('#fl-regimen').onchange = (e) => { fFlota.regimen = e.target.value; pFlota(); };
+      <td>${(fFlota.vtipo || fFlota.plazo) && fFlota.plazo !== 'ninguno'
+        ? v._venc.map((x) => (TIPOS_VENC[x.tipo] || x.tipo) + ' · ' + estadoFecha(x.fecha_vencimiento)).join('<br>')
+        : v.proximo_vencimiento ? (TIPOS_VENC[v.proximo_tipo] || v.proximo_tipo) + ' · ' + estadoFecha(v.proximo_vencimiento) : et('gris', 'Sin vencimientos')}</td></tr>`).join('')}
+  </table>${lista.length ? '' : `<div class="vacio">${filtros ? 'Ningún vehículo cumple estos filtros.' : 'No hay vehículos. Pulsa «+ Nuevo vehículo».'}</div>`}</div>`;
+  ['ver', 'tipo', 'regimen', 'vtipo', 'plazo'].forEach((k) => { $('#fl-' + k).onchange = (e) => { fFlota[k] = e.target.value; pFlota(); }; });
+  $('#fl-buscar').oninput = (e) => { fFlota.buscar = e.target.value; clearTimeout(pFlota.t); pFlota.t = setTimeout(() => { pFlota().then(() => { const b = $('#fl-buscar'); b.focus(); b.setSelectionRange(b.value.length, b.value.length); }); }, 350); };
+}
+// Excel de la flota (lo que se ve con los filtros puestos): hoja de vehículos + hoja de vencimientos
+async function exportarFlotaExcel() {
+  await cargarScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+  const n2 = (x) => (x == null || x === '' ? '' : Math.round(Number(x) * 100) / 100);
+  const f = (d) => fecha(d) || '';
+  const lista = pFlota.lista || [];
+  const conductor = (id) => (S.conductores.find((c) => c.id === id) || {}).nombre || '';
+  const vehiculos = lista.map((v) => ({
+    Matrícula: v.matricula, Tipo: TIPOS_VEH[v.tipo] || v.tipo, Marca: v.marca || '', Modelo: v.modelo || '', Bastidor: v.bastidor || '',
+    'Fecha matriculación': f(v.fecha_matriculacion), 'Norma Euro': v.norma_euro || '', 'MMA (kg)': n2(v.mma_kg), Frigorífico: v.frigorifico ? 'Sí' : 'No',
+    'Equipo de frío': v.equipo_frio || '', 'Horas frío': n2(v.horas_equipo_frio), 'Km actuales': n2(v.km_actuales), 'Km a fecha': f(v.km_actuales_fecha),
+    'Remolque habitual': v.remolque_habitual || '', 'Conductor habitual': v.conductor_habitual || conductor(v.conductor_habitual_id),
+    Régimen: REGIMEN[v.regimen] || v.regimen, Entidad: v.entidad || '', 'Nº contrato': v.num_contrato || '', 'Inicio contrato': f(v.contrato_inicio), 'Fin contrato': f(v.contrato_fin),
+    'Cuota mensual (sin IVA)': n2(v.cuota_mensual), 'IVA cuota %': n2(v.cuota_iva_pct), 'Día cargo': n2(v.dia_cargo), 'Valor residual': n2(v.valor_residual),
+    'Km contratados/año': n2(v.km_contratados_anio), 'Precio km exceso': n2(v.precio_km_exceso),
+    'Fecha compra': f(v.fecha_compra), 'Precio compra': n2(v.precio_compra), 'Años amortización': n2(v.anios_amortizacion),
+    'Coste fijo / mes': n2(v.coste_fijo_mes), 'Próximo vencimiento': v.proximo_vencimiento ? (TIPOS_VENC[v.proximo_tipo] || v.proximo_tipo) + ' ' + f(v.proximo_vencimiento) : '',
+    'Tarjeta gasoil': v.tarjeta_gasoil || '', 'Dispositivo peaje': v.dispositivo_peaje || '', 'Alta empresa': f(v.fecha_alta), Baja: f(v.fecha_baja), Notas: v.notas || ''
+  }));
+  const estado = (d) => (d < hoy() ? 'CADUCADO' : d <= sumarDias(hoy(), S.empresa?.dias_aviso_vencimientos ?? 30) ? 'Vence pronto' : 'En vigor');
+  const vencimientos = [];
+  lista.forEach((v) => ((fFlota.vtipo || fFlota.plazo) && fFlota.plazo !== 'ninguno' ? v._venc : pFlota.venc[v.id] || []).forEach((x) => vencimientos.push({
+    Matrícula: v.matricula, Tipo: TIPOS_VENC[x.tipo] || x.tipo, 'Compañía / taller': x.proveedor || '', 'Nº póliza / nota': x.descripcion || '',
+    Vence: f(x.fecha_vencimiento), Estado: estado(x.fecha_vencimiento), Importe: n2(x.importe), 'Cada (meses)': n2(x.periodicidad_meses), Documento: x.archivo_url ? 'Sí' : 'No'
+  })));
+  const wb = XLSX.utils.book_new();
+  const hoja = (filas, nombre) => { const ws = XLSX.utils.json_to_sheet(filas.length ? filas : [{ '': 'Sin datos' }]);
+    ws['!cols'] = Object.keys(filas[0] || { '': '' }).map((k) => ({ wch: Math.max(10, Math.min(40, Math.max(k.length + 2, ...filas.map((r) => String(r[k] ?? '').length + 2)))) }));
+    ws['!autofilter'] = filas.length ? { ref: ws['!ref'] } : undefined; XLSX.utils.book_append_sheet(wb, ws, nombre); };
+  hoja(vehiculos, 'Vehículos'); hoja(vencimientos, 'Vencimientos');
+  XLSX.writeFile(wb, `flota_${hoy()}.xlsx`);
+  aviso(`Excel descargado: ${vehiculos.length} vehículos, ${vencimientos.length} vencimientos`);
 }
 
 // Campos de la ficha del vehículo, por pestaña: [campo, etiqueta, tipo]
