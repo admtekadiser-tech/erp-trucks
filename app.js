@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v0.3
+/* ERP TRUCKS CROS TRANSPORT · v0.4
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -116,7 +116,7 @@ function pantallaCambioPass(obligatorio) {
 /* ---------------------------------------------------------------- estructura */
 const MENU = [
   ['inicio', 'Inicio'], ['viajes', 'Viajes'], ['facturas', 'Facturas'],
-  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Conductores'], ['gastos', 'Gastos'],
+  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Personal'], ['gastos', 'Gastos'],
   ['gestoria', 'Gestoría'], ['empresa', 'Empresa']
 ];
 
@@ -179,7 +179,7 @@ async function pInicio() {
     <div class="kpi"><div class="t">Facturado este mes (base)</div><div class="n">${eur(suma(mes, 'base'))}</div><div class="t">${mes.length} facturas</div></div>
   </div>
   <h2>Avisos</h2>
-  ${alertas.length ? alertas.map((a) => `<div class="alerta ${a.nivel}">${et(a.nivel, { flota: 'Flota', conductores: 'Conductor', cobros: 'Cobro', facturacion: 'Facturación' }[a.grupo])} ${esc(a.texto)}<span class="f">${fecha(a.fecha)}</span></div>`).join('')
+  ${alertas.length ? alertas.map((a) => `<div class="alerta ${a.nivel}">${et(a.nivel, { flota: 'Flota', conductores: 'Personal', cobros: 'Cobro', facturacion: 'Facturación' }[a.grupo])} ${esc(a.texto)}<span class="f">${fecha(a.fecha)}</span></div>`).join('')
     : '<div class="tarjeta vacio">Todo en orden: no hay avisos.</div>'}`;
 }
 
@@ -890,7 +890,7 @@ function tablaVencimientos(lista, tipos, tabla, recargar) {
   const r = esc(JSON.stringify(recargar));
   return `<div class="tabla-wrap"><table><tr><th>Tipo</th>${veh ? '<th>Compañía / taller</th>' : ''}<th>Nota / nº</th><th>Vence</th>${veh ? '<th class="num">Importe</th><th class="num">Cada</th>' : ''}<th>Doc.</th><th></th></tr>
   ${lista.map((x) => `<tr style="${x.renovado ? 'opacity:.5' : ''}"><td>${esc(tipos[x.tipo] || x.tipo)}</td>${veh ? `<td>${esc(x.proveedor)}</td>` : ''}<td>${esc(x.descripcion ?? x.numero ?? '')}</td>
-    <td>${x.renovado ? fecha(x.fecha_vencimiento) + ' ' + et('gris', 'Renovado') : estadoFecha(x.fecha_vencimiento)}</td>
+    <td>${x.renovado ? fecha(x.fecha_vencimiento) + ' ' + et('gris', 'Renovado') : x.fecha_vencimiento ? estadoFecha(x.fecha_vencimiento) : et('gris', 'No caduca')}</td>
     ${veh ? `<td class="num">${x.importe != null ? eur(x.importe) : ''}</td><td class="num">${x.periodicidad_meses ? x.periodicidad_meses + ' meses' : ''}</td>` : ''}
     <td>${enlaceArchivo(x.archivo_url)}</td>
     <td style="white-space:nowrap"><button class="sec peq" onclick="editarVencimiento('${tabla}','${x.id}', ${r})">Editar</button>
@@ -925,7 +925,7 @@ function periodoPorTipo() { const p = $('#vx-periodo'); if (p && editarVencimien
 async function guardarVencimiento() {
   const { tabla, id, recargar, padreId, modo } = editarVencimiento.ctx;
   const veh = tabla === 'vehiculo_vencimientos';
-  if (!val('vx-fecha')) return aviso('Pon la fecha de vencimiento', true);
+  if (veh && !val('vx-fecha')) return aviso('Pon la fecha de vencimiento', true);
   const reg = { tipo: val('vx-tipo'), fecha_vencimiento: val('vx-fecha') };
   if (veh) {
     const imp = leerNum($('#vx-importe').value);
@@ -950,54 +950,150 @@ async function borrarFila(tabla, id, recargar) {
   if (!confirm('¿Quitar este registro?')) return;
   await q(db().from(tabla).delete().eq('id', id)); eval(recargar);
 }
-/* ---------------------------------------------------------------- CONDUCTORES */
-const TIPOS_DOC = { carne: 'Carné de conducir', cap: 'CAP', tarjeta_tacografo: 'Tarjeta tacógrafo', reconocimiento_medico: 'Reconocimiento médico', adr: 'ADR', otro: 'Otro' };
+/* ---------------------------------------------------------------- PERSONAL (RRHH) */
+const TIPOS_DOC = { carne: 'Carné de conducir', cap: 'CAP', tarjeta_tacografo: 'Tarjeta tacógrafo', reconocimiento_medico: 'Reconocimiento médico', adr: 'ADR',
+  contrato: 'Contrato de trabajo', formacion_prl: 'Formación PRL', entrega_epis: 'Entrega de EPIs / ropa', formacion: 'Otra formación', otro: 'Otro' };
+const PUESTOS = { conductor: 'Conductor', mozo_almacen: 'Mozo de almacén', mecanico: 'Mecánico', trafico: 'Tráfico', administracion: 'Administración', otro: 'Otro' };
+const CONTRATOS = { '': '—', indefinido: 'Indefinido', temporal: 'Temporal', fijo_discontinuo: 'Fijo discontinuo', practicas: 'Prácticas', otro: 'Otro' };
+const TIPOS_CONCEPTO = [['plus', '+ Plus'], ['extra', '+ Extra'], ['bonus', '+ Bonus / incentivo'], ['kilometraje', '+ Kilometraje'], ['otro_suma', '+ Otro (suma)'],
+  ['descuento', '− Descuento'], ['multa', '− Multa'], ['danos', '− Daños / desperfectos'], ['otro_resta', '− Otro (resta)']];
+const CONCEPTO_RESTA = ['descuento', 'multa', 'danos', 'otro_resta'];
+// Movimientos del mes de cada empleado: [campo, etiqueta, tipo]; tipo puede ser lista de opciones [valor, texto]
 const SUBCOND = {
+  combustible_conductor: { titulo: 'Gasolina', ayuda: 'Gasolina que echa en el taller. Se descuenta de la nómina del mes que elijas en «Se descuenta en».',
+    campos: [['fecha', 'Fecha', 'date'], ['lugar', 'Dónde'], ['vehiculo', 'Vehículo / matrícula'], ['litros', 'Litros', 'number'], ['importe', 'Importe €', 'number'], ['mes_nomina', 'Se descuenta en', 'month'], ['notas', 'Notas']],
+    filtro: 'mes_nomina', orden: 'fecha', total: 'importe' },
+  anticipos: { titulo: 'Anticipos', campos: [['fecha', 'Fecha', 'date'], ['importe', 'Importe €', 'number'], ['mes_nomina', 'Se descuenta en', 'month'], ['concepto', 'Concepto']], filtro: 'mes_nomina', orden: 'fecha', total: 'importe' },
+  nomina_conceptos: { titulo: 'Extras y descuentos', ayuda: 'Lo que se suma (plus, extra, bonus…) o se resta (multas, daños…) en la nómina de ese mes.',
+    campos: [['tipo', 'Tipo', TIPOS_CONCEPTO], ['concepto', 'Concepto'], ['importe', 'Importe €', 'number'], ['mes_nomina', 'Mes de nómina', 'month']], filtro: 'mes_nomina', orden: 'creado_en' },
   dietas: { titulo: 'Dietas', campos: [['fecha', 'Fecha', 'date'], ['tipo', 'Tipo', ['completa', 'desayuno', 'comida', 'cena', 'pernocta', 'otro']], ['importe', 'Importe €', 'number'], ['notas', 'Notas']], filtro: 'fecha', total: 'importe' },
-  anticipos: { titulo: 'Anticipos', campos: [['fecha', 'Fecha', 'date'], ['importe', 'Importe €', 'number'], ['mes_nomina', 'Se descuenta en', 'month'], ['concepto', 'Concepto']], filtro: 'mes_nomina', total: 'importe' },
   horas_extra: { titulo: 'Horas extra', campos: [['fecha', 'Fecha', 'date'], ['horas', 'Horas', 'number'], ['notas', 'Notas']], filtro: 'fecha', total: 'horas' },
-  ausencias: { titulo: 'Vacaciones y ausencias', campos: [['tipo', 'Tipo', ['vacaciones', 'permiso', 'baja', 'otro']], ['desde', 'Desde', 'date'], ['hasta', 'Hasta', 'date'], ['notas', 'Notas']], filtro: 'rango' }
+  ausencias: { titulo: 'Vacaciones y ausencias', campos: [['tipo', 'Tipo', ['vacaciones', 'permiso', 'baja', 'asuntos_propios', 'otro']], ['desde', 'Desde', 'date'], ['hasta', 'Hasta', 'date'], ['notas', 'Notas']], filtro: 'rango' }
 };
-const fCond = { ver: 'activos', mes: hoy().slice(0, 7) };
+const OPCIONALES = ['notas', 'concepto', 'lugar', 'vehiculo', 'litros'];
+// Campos de la ficha, por pestaña
+const CAMPOS_PERS = {
+  ficha: [['nombre', 'Nombre y apellidos'], ['dni', 'DNI / NIE'], ['puesto', 'Puesto', PUESTOS], ['telefono', 'Teléfono', 'tel'], ['email', 'Email', 'email'],
+    ['fecha_nacimiento', 'Fecha de nacimiento', 'date'], ['direccion', 'Dirección'], ['cp', 'C.P.'], ['poblacion', 'Población'], ['provincia', 'Provincia'],
+    ['nss', 'Nº Seguridad Social'], ['iban', 'IBAN (cuenta de la nómina)'], ['contacto_emergencia', 'Contacto de emergencia'], ['telefono_emergencia', 'Teléfono de emergencia', 'tel'],
+    ['talla_ropa', 'Talla de ropa'], ['talla_calzado', 'Talla de calzado']],
+  contrato: [['fecha_alta', 'Fecha de alta', 'date'], ['tipo_contrato', 'Tipo de contrato', CONTRATOS], ['fin_contrato', 'Fin de contrato (si es temporal)', 'date'],
+    ['jornada', 'Jornada', { '': '—', completa: 'Completa', parcial: 'Parcial' }], ['horas_semana', 'Horas a la semana', 'number'], ['categoria', 'Categoría profesional'], ['convenio', 'Convenio'],
+    ['salario_bruto_anual', 'Salario bruto anual €', 'money'], ['num_pagas', 'Nº de pagas', 'number'], ['neto_mensual', 'Nómina neta mensual habitual €', 'money'],
+    ['precio_hora_extra', 'Precio hora extra €', 'money'], ['dias_vacaciones_anio', 'Días de vacaciones al año', 'number'],
+    ['fecha_baja', 'Fecha de baja en la empresa', 'date'], ['activo', 'En plantilla', 'checkbox']]
+};
+
+const fCond = { ver: 'activos', mes: hoy().slice(0, 7), vista: 'plantilla' };
 async function pConductores() {
+  if (fCond.vista === 'nominas') return pNominasMes();
   let qy = db().from('v_conductores').select('*').order('nombre');
   if (fCond.ver === 'activos') qy = qy.eq('activo', true); else if (fCond.ver === 'inactivos') qy = qy.eq('activo', false);
   const lista = await q(qy);
+  const margen = S.empresa?.dias_aviso_vencimientos ?? 30;
+  const pronto = (d) => d && d <= sumarDias(hoy(), margen);
+  const activos = lista.filter((c) => c.activo);
   $('#pagina').innerHTML = `
-  <h1>Conductores</h1>
+  <h1>Personal</h1>
+  ${barraPersonal()}
   <div class="barra">
-    <div class="campo"><label>Ver</label><select id="co-ver">${[['activos', 'Activos'], ['inactivos', 'De baja'], ['', 'Todos']].map(([k, t]) => `<option value="${k}" ${fCond.ver === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Ver</label><select id="co-ver">${[['activos', 'En plantilla'], ['inactivos', 'De baja'], ['', 'Todos']].map(([k, t]) => `<option value="${k}" ${fCond.ver === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
     <button class="sec" onclick="sincronizarConductores()">⟳ Traer nuevos de TransControl</button>
-    <button onclick="editarConductor()">+ Conductor</button>
+    <button onclick="editarConductor()">+ Empleado</button>
   </div>
-  <p class="ayuda">Los conductores vienen de TransControl. Aquí se completan su ficha, documentos, dietas, anticipos, horas y vacaciones (lo que se pasa a la gestoría).</p>
+  <div class="kpis">
+    <div class="kpi"><div class="t">En plantilla</div><div class="n">${activos.length}</div><div class="t">${activos.filter((c) => c.puesto === 'conductor').length} conductores</div></div>
+    <div class="kpi"><div class="t">Nóminas netas / mes</div><div class="n">${eur(activos.reduce((a, c) => a + Number(c.neto_mensual || 0), 0))}</div><div class="t">${activos.filter((c) => c.neto_mensual == null).length ? activos.filter((c) => c.neto_mensual == null).length + ' sin nómina puesta' : 'neto habitual'}</div></div>
+    <div class="kpi"><div class="t">Contratos que terminan</div><div class="n" style="color:${activos.filter((c) => pronto(c.fin_contrato)).length ? 'var(--ambar)' : 'inherit'}">${activos.filter((c) => pronto(c.fin_contrato)).length}</div><div class="t">próximos ${margen} días</div></div>
+    <div class="kpi"><div class="t">Documentos que caducan</div><div class="n" style="color:${activos.filter((c) => pronto(c.proximo_vencimiento)).length ? 'var(--ambar)' : 'inherit'}">${activos.filter((c) => pronto(c.proximo_vencimiento)).length}</div><div class="t">carné, CAP, tacógrafo, médico…</div></div>
+  </div>
   <div class="tabla-wrap"><table>
-    <tr><th>Conductor</th><th>DNI</th><th>Teléfono</th><th>Documentos</th><th>Próximo vencimiento</th><th>Estado</th></tr>
-    ${lista.map((c) => `<tr class="clic" onclick="editarConductor('${c.id}')"><td><b>${esc(c.nombre)}</b></td><td>${esc(c.dni) || et('ambar', 'Falta')}</td><td>${esc(c.telefono)}</td>
-      <td>${c.num_documentos || et('ambar', 'Ninguno')}</td><td>${c.proximo_vencimiento ? (TIPOS_DOC[c.proximo_tipo] || '') + ' · ' + estadoFecha(c.proximo_vencimiento) : ''}</td>
+    <tr><th>Nombre</th><th>Puesto</th><th>DNI</th><th>Teléfono</th><th>Contrato</th><th class="num">Neto / mes</th><th>Próximo vencimiento</th><th>Estado</th></tr>
+    ${lista.map((c) => `<tr class="clic" onclick="editarConductor('${c.id}')"><td><b>${esc(c.nombre)}</b></td><td>${PUESTOS[c.puesto] || c.puesto}</td><td>${esc(c.dni) || et('ambar', 'Falta')}</td><td>${esc(c.telefono)}</td>
+      <td>${esc(CONTRATOS[c.tipo_contrato] || c.tipo_contrato || '')}${c.fin_contrato ? ' · ' + estadoFecha(c.fin_contrato) : ''}</td>
+      <td class="num">${c.neto_mensual != null ? eur(c.neto_mensual) : et('gris', 'Sin poner')}</td>
+      <td>${c.proximo_vencimiento ? (TIPOS_DOC[c.proximo_tipo] || '') + ' · ' + estadoFecha(c.proximo_vencimiento) : (c.num_documentos ? '' : et('ambar', 'Sin documentos'))}</td>
       <td>${c.activo ? et('verde', 'Activo') : et('gris', 'Baja')}</td></tr>`).join('')}
-  </table>${lista.length ? '' : '<div class="vacio">No hay conductores.</div>'}</div>`;
+  </table>${lista.length ? '' : '<div class="vacio">No hay empleados.</div>'}</div>`;
   $('#co-ver').onchange = (e) => { fCond.ver = e.target.value; pConductores(); };
+}
+function barraPersonal() {
+  return `<div class="barra">${[['plantilla', 'Plantilla'], ['nominas', 'Nóminas del mes']].map(([k, t]) =>
+    `<button class="${fCond.vista === k ? '' : 'sec'}" onclick="fCond.vista='${k}';pConductores()">${t}</button>`).join('')}</div>`;
 }
 async function sincronizarConductores() {
   await q(db().rpc('sincronizar_conductores'));
   await recargarMaestros(); aviso('Conductores actualizados desde TransControl'); pConductores();
 }
+
+/* Nóminas del mes: liquidación de toda la plantilla */
+async function pNominasMes() {
+  const ini = fCond.mes + '-01';
+  const lista = await q(db().rpc('liquidacion_mes', { p_mes: ini }));
+  pNominasMes.lista = lista;
+  const s = (k) => lista.reduce((a, x) => a + Number(x[k] || 0), 0);
+  const pagadas = lista.filter((x) => x.pagado).length;
+  $('#pagina').innerHTML = `
+  <h1>Personal</h1>
+  ${barraPersonal()}
+  <div class="barra">
+    <div class="campo"><label>Mes</label><input type="month" id="nm-mes" value="${fCond.mes}"></div>
+    <button class="sec" onclick="excelNominas()">⬇ Excel</button>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="t">Total a pagar ${mesTexto(fCond.mes)}</div><div class="n">${eur(s('total'))}</div><div class="t">${lista.length} empleados</div></div>
+    <div class="kpi"><div class="t">Descuentos</div><div class="n">${eur(s('anticipos') + s('combustible') + s('descuentos'))}</div><div class="t">anticipos ${eur(s('anticipos'))} · gasolina ${eur(s('combustible'))}</div></div>
+    <div class="kpi"><div class="t">Extras y dietas</div><div class="n">${eur(s('extras') + s('dietas') + s('horas_extra_importe'))}</div><div class="t">horas extra ${num(s('horas_extra'))} h</div></div>
+    <div class="kpi"><div class="t">Pagadas</div><div class="n">${pagadas} / ${lista.length}</div></div>
+  </div>
+  <p class="ayuda">Neto de nómina + dietas + horas extra + extras − anticipos − gasolina − descuentos. Pulsa un empleado para ver su ficha del mes, cambiar el neto de ese mes o marcarla como pagada.</p>
+  <div class="tabla-wrap"><table>
+    <tr><th>Empleado</th><th class="num">Neto nómina</th><th class="num">+ Dietas</th><th class="num">+ H. extra</th><th class="num">+ Extras</th><th class="num">− Anticipos</th><th class="num">− Gasolina</th><th class="num">− Descuentos</th><th class="num">A pagar</th><th>Estado</th></tr>
+    ${lista.map((x) => `<tr class="clic" onclick="editarConductor('${x.conductor_id}','mes')"><td><b>${esc(x.nombre)}</b><br><small>${PUESTOS[x.puesto] || ''}${x.viajes ? ' · ' + x.viajes + ' viajes' : ''}</small></td>
+      <td class="num">${Number(x.neto_base) ? eur(x.neto_base) : et('ambar', 'Sin nómina')}${x.neto_ajustado ? '<br><small>ajustado este mes</small>' : ''}</td>
+      <td class="num">${cero(x.dietas)}</td><td class="num">${cero(x.horas_extra_importe)}${Number(x.horas_extra) ? '<br><small>' + num(x.horas_extra) + ' h</small>' : ''}</td><td class="num">${cero(x.extras)}</td>
+      <td class="num">${cero(x.anticipos)}</td><td class="num">${cero(x.combustible)}</td><td class="num">${cero(x.descuentos)}</td>
+      <td class="num"><b>${eur(x.total)}</b></td>
+      <td>${x.pagado ? et('verde', 'Pagada ' + fecha(x.fecha_pago)) + (Number(x.total_pagado) !== Number(x.total) ? '<br>' + et('rojo', 'Ha cambiado: se pagó ' + eur(x.total_pagado)) : '') : et('ambar', 'Pendiente')}${x.ausencias ? '<br><small>' + esc(x.ausencias) + '</small>' : ''}</td></tr>`).join('')}
+    ${lista.length ? `<tr class="totales-fila"><td><b>Total</b></td>${['neto_base', 'dietas', 'horas_extra_importe', 'extras', 'anticipos', 'combustible', 'descuentos', 'total'].map((k) => `<td class="num"><b>${eur(s(k))}</b></td>`).join('')}<td></td></tr>` : ''}
+  </table>${lista.length ? '' : '<div class="vacio">No hay empleados en plantilla este mes.</div>'}</div>`;
+  $('#nm-mes').onchange = (e) => { fCond.mes = e.target.value; pNominasMes(); };
+}
+const cero = (n) => (Number(n) ? eur(n) : '<span style="color:var(--gris)">—</span>');
+async function excelNominas() {
+  await cargarScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+  const n2 = (x) => Math.round(Number(x || 0) * 100) / 100;
+  const ws = XLSX.utils.json_to_sheet(pNominasMes.lista.map((x) => ({ Empleado: x.nombre, DNI: x.dni || '', Puesto: PUESTOS[x.puesto] || '', Viajes: x.viajes, 'Neto nómina': n2(x.neto_base),
+    Dietas: n2(x.dietas), 'Horas extra (h)': n2(x.horas_extra), 'Horas extra €': n2(x.horas_extra_importe), Extras: n2(x.extras), Anticipos: n2(x.anticipos), Gasolina: n2(x.combustible),
+    Descuentos: n2(x.descuentos), 'A pagar': n2(x.total), Ausencias: x.ausencias || '', Pagada: x.pagado ? 'Sí ' + fecha(x.fecha_pago) : 'No' })));
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Nóminas'); XLSX.writeFile(wb, `nominas_${fCond.mes}.xlsx`);
+}
+
+/* Ficha del empleado */
+function campoPers(c, [k, t, tipo = 'text']) {
+  const id = 'cd-' + k;
+  if (tipo === 'checkbox') return `<div><label>${t}</label><input type="checkbox" id="${id}" style="width:auto" ${c[k] ? 'checked' : ''}></div>`;
+  if (typeof tipo === 'object') return `<div><label>${t}</label><select id="${id}">${Object.entries(tipo).map(([o, x]) => `<option value="${o}" ${String(c[k] ?? '') === o ? 'selected' : ''}>${x}</option>`).join('')}</select></div>`;
+  if (tipo === 'money') return `<div><label>${t}</label><input id="${id}" inputmode="decimal" value="${numCampo(c[k])}"></div>`;
+  return `<div><label>${t}</label><input id="${id}" type="${tipo}" value="${esc(c[k])}"></div>`;
+}
 async function editarConductor(id, pestana = 'ficha') {
-  const c = id ? await q(db().from('conductores').select('*').eq('id', id).single()) : { activo: true };
-  const tabs = id ? [['ficha', 'Ficha'], ['documentos', 'Documentos'], ...Object.entries(SUBCOND).map(([k, x]) => [k, x.titulo])] : [['ficha', 'Ficha']];
+  if (id === 'undefined' || id === 'null') id = null;
+  const c = id ? await q(db().from('conductores').select('*').eq('id', id).single()) : { activo: true, puesto: 'conductor', num_pagas: 14, dias_vacaciones_anio: 30 };
+  const tabs = [['ficha', 'Datos personales'], ['contrato', 'Contrato y salario'], ['mes', 'Ficha del mes'], ...Object.entries(SUBCOND).map(([k, x]) => [k, x.titulo]), ['documentos', 'Documentos']];
   let cuerpo = '';
-  if (pestana === 'ficha') {
-    const campo = (k, t, tipo = 'text') => `<div><label>${t}</label><input id="cd-${k}" type="${tipo}" value="${esc(c[k])}"></div>`;
-    cuerpo = `<div class="rejilla">${campo('nombre', 'Nombre')}${campo('dni', 'DNI / NIE')}${campo('telefono', 'Teléfono', 'tel')}${campo('email', 'Email', 'email')}
-      ${campo('fecha_alta', 'Fecha de alta', 'date')}${campo('fecha_baja', 'Fecha de baja', 'date')}
-      <div><label>Activo</label><input type="checkbox" id="cd-activo" style="width:auto" ${c.activo ? 'checked' : ''}></div></div>
-      ${c.tc_conductor_id ? '<p class="ayuda">Vinculado a TransControl: el nombre se actualiza desde allí.</p>' : ''}
-      <label>Notas</label><textarea id="cd-notas">${esc(c.notas)}</textarea>
-      <div class="acciones"><button class="sec" onclick="cerrarModal();pConductores()">Cerrar</button><button onclick="guardarConductor(${id ? `'${id}'` : ''})">Guardar ficha</button></div>`;
+  if (pestana === 'ficha' || pestana === 'contrato') {
+    cuerpo = `<div class="rejilla">${CAMPOS_PERS[pestana].map((x) => campoPers(c, x)).join('')}</div>
+      ${pestana === 'ficha' ? `${c.tc_conductor_id ? '<p class="ayuda">Vinculado a TransControl: el nombre se actualiza desde allí.</p>' : ''}<label>Notas</label><textarea id="cd-notas">${esc(c.notas)}</textarea>` : ''}
+      ${pestana === 'contrato' ? `<p class="ayuda" style="margin-top:12px">La <b>nómina neta habitual</b> es la que se usa cada mes en la Ficha del mes; si un mes la gestoría da otro neto, se cambia solo para ese mes desde allí.
+        ${c.salario_bruto_anual ? `Bruto mensual: <b>${eur(c.salario_bruto_anual / (c.num_pagas || 12))}</b> (${c.num_pagas || 12} pagas).` : ''}</p>` : ''}
+      <div class="acciones"><button class="sec" onclick="cerrarModal();pConductores()">Cerrar</button><button onclick="guardarConductor(${id ? `'${id}'` : 'null'},'${pestana}')">Guardar</button></div>`;
+  } else if (pestana === 'mes') {
+    cuerpo = await fichaMes(c);
   } else if (pestana === 'documentos') {
     const docs = await q(db().from('conductor_documentos').select('*').eq('conductor_id', id).order('renovado').order('fecha_vencimiento'));
-    cuerpo = `${tablaVencimientos(docs, TIPOS_DOC, 'conductor_documentos', `editarConductor('${id}','documentos')`)}
+    cuerpo = `<p class="ayuda">Carné, CAP, tacógrafo, reconocimiento médico, contrato, formación de PRL, entrega de EPIs… Si un documento no caduca, deja la fecha vacía.</p>
+    ${tablaVencimientos(docs, TIPOS_DOC, 'conductor_documentos', `editarConductor('${id}','documentos')`)}
     <div class="barra" style="margin-top:12px">
       <div class="campo"><label>Documento</label><select id="dc-tipo">${Object.entries(TIPOS_DOC).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select></div>
       <div class="campo"><label>Número</label><input id="dc-numero"></div>
@@ -1007,40 +1103,150 @@ async function editarConductor(id, pestana = 'ficha') {
   } else {
     cuerpo = await subtablaConductor(id, pestana);
   }
-  modal(`<h1>${id ? esc(c.nombre) : 'Nuevo conductor'}</h1>
-  <div class="barra">${tabs.map(([k, t]) => `<button class="${k === pestana ? '' : 'sec'} peq" onclick="editarConductor('${id}','${k}')">${t}</button>`).join('')}</div>
+  modal(`<h1>${id ? esc(c.nombre) + ' <small style="font-weight:400;color:var(--gris)">' + (PUESTOS[c.puesto] || '') + '</small>' : 'Nuevo empleado'}</h1>
+  ${id ? `<div class="barra">${tabs.map(([k, t]) => `<button class="${k === pestana ? '' : 'sec'} peq" onclick="editarConductor('${id}','${k}')">${t}</button>`).join('')}</div>`
+    : '<p class="ayuda">Guarda los datos y después podrás rellenar el contrato, la nómina, la gasolina, los anticipos…</p>'}
   ${cuerpo}`);
 }
-async function guardarConductor(id) {
+async function guardarConductor(id, pestana = 'ficha') {
   const reg = {};
-  ['nombre', 'dni', 'telefono', 'email', 'fecha_alta', 'fecha_baja', 'notas'].forEach((k) => (reg[k] = val('cd-' + k)));
-  reg.activo = val('cd-activo');
-  if (!reg.nombre) return aviso('El nombre es obligatorio', true);
-  if (reg.dni) reg.dni = reg.dni.toUpperCase().replace(/[\s-]/g, '');
+  for (const [k, t, tipo] of CAMPOS_PERS[pestana]) {
+    const e = document.getElementById('cd-' + k); if (!e) continue;
+    if (tipo === 'checkbox') reg[k] = e.checked;
+    else if (tipo === 'money') { const n = leerNum(e.value); if (Number.isNaN(n)) return aviso(`${t}: importe no válido`, true); reg[k] = n; }
+    else reg[k] = val('cd-' + k);
+  }
+  if (pestana === 'ficha') {
+    reg.notas = val('cd-notas');
+    if (!reg.nombre) return aviso('El nombre es obligatorio', true);
+    if (reg.dni) reg.dni = reg.dni.toUpperCase().replace(/[\s-]/g, '');
+    if (reg.iban) reg.iban = reg.iban.toUpperCase().replace(/\s+/g, '');
+  }
   if (id) await q(db().from('conductores').update(reg).eq('id', id));
   else id = (await q(db().from('conductores').insert(reg).select('id').single())).id;
-  await recargarMaestros(); aviso('Ficha guardada'); editarConductor(id);
+  await recargarMaestros(); aviso('Guardado'); editarConductor(id, pestana);
 }
 async function anadirDocumento(condId) {
-  if (!val('dc-fecha')) return aviso('Pon la fecha de caducidad', true);
   const archivo = await subirArchivo('dc-archivo', 'conductores/' + condId);
   await q(db().from('conductor_documentos').insert({ conductor_id: condId, tipo: val('dc-tipo'), numero: val('dc-numero'), fecha_vencimiento: val('dc-fecha'), archivo_url: archivo }));
   aviso('Documento añadido'); editarConductor(condId, 'documentos');
 }
+
+/* Ficha del mes: liquidación, movimientos, vacaciones y avisos de una persona */
+async function fichaMes(c) {
+  const ini = fCond.mes + '-01'; const fin = finMes(ini); const anio = fCond.mes.slice(0, 4);
+  const [liq, comb, anti, conc, diet, horas, aus, docs] = await Promise.all([
+    q(db().rpc('liquidacion_mes', { p_mes: ini, p_conductor: c.id })),
+    q(db().from('combustible_conductor').select('*').eq('conductor_id', c.id).eq('mes_nomina', ini).order('fecha')),
+    q(db().from('anticipos').select('*').eq('conductor_id', c.id).eq('mes_nomina', ini).order('fecha')),
+    q(db().from('nomina_conceptos').select('*').eq('conductor_id', c.id).eq('mes_nomina', ini).order('creado_en')),
+    q(db().from('dietas').select('*').eq('conductor_id', c.id).gte('fecha', ini).lte('fecha', fin).order('fecha')),
+    q(db().from('horas_extra').select('*').eq('conductor_id', c.id).gte('fecha', ini).lte('fecha', fin).order('fecha')),
+    q(db().from('ausencias').select('*').eq('conductor_id', c.id).lte('desde', anio + '-12-31').gte('hasta', anio + '-01-01').order('desde')),
+    q(db().from('conductor_documentos').select('*').eq('conductor_id', c.id).eq('renovado', false).not('fecha_vencimiento', 'is', null).order('fecha_vencimiento'))
+  ]);
+  const L = liq[0] || { neto_base: c.neto_mensual || 0, total: 0 };
+  fichaMes.datos = { c, L, comb, anti, conc, diet, horas, aus };
+  // Vacaciones del año: días naturales de «vacaciones» dentro del año
+  const dias = (a) => { const d1 = a.desde < anio + '-01-01' ? anio + '-01-01' : a.desde; const d2 = a.hasta > anio + '-12-31' ? anio + '-12-31' : a.hasta; return Math.round((new Date(d2) - new Date(d1)) / 86400000) + 1; };
+  const vacUsadas = aus.filter((a) => a.tipo === 'vacaciones').reduce((s, a) => s + dias(a), 0);
+  const ausMes = aus.filter((a) => a.desde <= fin && a.hasta >= ini);
+  const margen = S.empresa?.dias_aviso_vencimientos ?? 30;
+  const avisos = [
+    ...docs.filter((d) => d.fecha_vencimiento <= sumarDias(hoy(), margen)).map((d) => `${TIPOS_DOC[d.tipo] || d.tipo} · ${estadoFecha(d.fecha_vencimiento)}`),
+    ...(c.fin_contrato && c.fin_contrato <= sumarDias(hoy(), Math.max(margen, 30)) ? [`Fin de contrato · ${estadoFecha(c.fin_contrato)}`] : []),
+    ...(!c.neto_mensual ? [et('ambar', 'No tiene puesta la nómina neta habitual (pestaña Contrato y salario)')] : [])
+  ];
+  const linea = (signo, txt, imp, det = '') => `<tr><td>${signo} ${txt}${det ? '<br><small>' + det + '</small>' : ''}</td><td class="num">${signo === '−' && Number(imp) ? '−' : ''}${eur(imp)}</td></tr>`;
+  const lista = (arr, f) => arr.map(f).join(' · ');
+  return `<div class="barra"><div class="campo"><label>Mes</label><input type="month" value="${fCond.mes}" onchange="fCond.mes=this.value;editarConductor('${c.id}','mes')"></div>
+    <button class="sec" onclick="imprimirFichaMes()">🖨 Imprimir ficha del mes</button></div>
+  ${avisos.length ? `<div class="alerta ambar" style="display:block">${avisos.join('<br>')}</div>` : ''}
+  <div class="kpis">
+    <div class="kpi"><div class="t">A pagar ${mesTexto(fCond.mes)}</div><div class="n">${eur(L.total)}</div><div class="t">${L.pagado ? 'Pagada el ' + fecha(L.fecha_pago) : 'Pendiente de pago'}</div></div>
+    <div class="kpi"><div class="t">Viajes del mes</div><div class="n">${L.viajes ?? 0}</div><div class="t">${ausMes.length ? 'Ausencias: ' + esc(L.ausencias || '') : 'Sin ausencias'}</div></div>
+    <div class="kpi"><div class="t">Vacaciones ${anio}</div><div class="n">${(c.dias_vacaciones_anio ?? 30) - vacUsadas} días</div><div class="t">le quedan · ha disfrutado ${vacUsadas} de ${c.dias_vacaciones_anio ?? 30}</div></div>
+  </div>
+  <div class="tabla-wrap"><table>
+    <tr><td>Nómina neta del mes<br><small>${L.neto_ajustado ? 'Ajustada para este mes' : 'Neto habitual'} · cámbiala si la gestoría da otro importe</small></td>
+      <td class="num"><input id="fm-neto" inputmode="decimal" style="width:120px;text-align:right" value="${numCampo(L.neto_base)}" onchange="guardarNetoMes('${c.id}')"></td></tr>
+    ${linea('+', 'Dietas', L.dietas, lista(diet, (d) => fecha(d.fecha).slice(0, 5) + ' ' + d.tipo + ' ' + eur(d.importe)))}
+    ${linea('+', 'Horas extra', L.horas_extra_importe, Number(L.horas_extra) ? num(L.horas_extra) + ' h × ' + eur(c.precio_hora_extra || 0) + (c.precio_hora_extra ? '' : ' (pon el precio de la hora extra en Contrato y salario)') : '')}
+    ${linea('+', 'Extras, pluses, bonus', L.extras, lista(conc.filter((x) => !CONCEPTO_RESTA.includes(x.tipo)), (x) => esc(x.concepto || x.tipo) + ' ' + eur(x.importe)))}
+    ${linea('−', 'Anticipos', L.anticipos, lista(anti, (a) => fecha(a.fecha).slice(0, 5) + ' ' + eur(a.importe)))}
+    ${linea('−', 'Gasolina del taller', L.combustible, lista(comb, (g) => fecha(g.fecha).slice(0, 5) + ' ' + (g.litros ? num(g.litros) + ' l ' : '') + eur(g.importe)))}
+    ${linea('−', 'Otros descuentos (multas, daños…)', L.descuentos, lista(conc.filter((x) => CONCEPTO_RESTA.includes(x.tipo)), (x) => esc(x.concepto || x.tipo) + ' ' + eur(x.importe)))}
+    <tr class="totales-fila"><td><b>Total a pagar</b></td><td class="num" style="font-size:18px"><b>${eur(L.total)}</b></td></tr>
+  </table></div>
+  ${L.pagado && Number(L.total_pagado) !== Number(L.total) ? `<div class="alerta rojo" style="margin-top:8px">Se marcó como pagada con ${eur(L.total_pagado)} y ahora sale ${eur(L.total)}: algo ha cambiado después del pago.</div>` : ''}
+  <p class="ayuda">Para añadir gasolina, anticipos, extras, dietas u horas usa sus pestañas de arriba (en el mismo mes).</p>
+  <div class="acciones">
+    ${L.pagado ? `<button class="sec" onclick="marcarNomina('${c.id}', false)">Desmarcar pago</button>` : ''}
+    <button class="sec" onclick="cerrarModal();pConductores()">Cerrar</button>
+    <button onclick="marcarNomina('${c.id}', true)">${L.pagado ? 'Volver a marcar pagada (' + eur(L.total) + ')' : 'Marcar como pagada'}</button>
+  </div>`;
+}
+async function guardarNetoMes(cid) {
+  const n = leerNum($('#fm-neto').value);
+  if (Number.isNaN(n)) return aviso('Importe no válido', true);
+  const neto = n === Number(fichaMes.datos.c.neto_mensual) ? null : n; // si es igual al habitual no se guarda ajuste
+  await q(db().from('nominas').upsert({ conductor_id: cid, mes: fCond.mes + '-01', neto_base: neto }, { onConflict: 'conductor_id,mes' }));
+  aviso('Neto del mes guardado'); editarConductor(cid, 'mes');
+}
+async function marcarNomina(cid, pagado) {
+  const L = fichaMes.datos.L;
+  const reg = { conductor_id: cid, mes: fCond.mes + '-01', pagado, fecha_pago: pagado ? hoy() : null, total_pagado: pagado ? L.total : null };
+  await q(db().from('nominas').upsert(reg, { onConflict: 'conductor_id,mes' }));
+  aviso(pagado ? 'Nómina marcada como pagada' : 'Pago desmarcado'); editarConductor(cid, 'mes');
+}
+function imprimirFichaMes() {
+  const { c, L, comb, anti, conc, diet, horas } = fichaMes.datos; const e = S.empresa || {};
+  const fila = (t, x, neg) => `<tr><td>${t}</td><td class="n">${neg && Number(x) ? '−' : ''}${eur(x)}</td></tr>`;
+  const det = (titulo, filas, cols) => filas.length ? `<h3>${titulo}</h3><table><tr>${cols.map((k) => `<th${k[2] ? ' class="n"' : ''}>${k[0]}</th>`).join('')}</tr>${filas.map((r) => `<tr>${cols.map((k) => `<td${k[2] ? ' class="n"' : ''}>${k[1](r)}</td>`).join('')}</tr>`).join('')}</table>` : '';
+  const w = window.open('', '_blank');
+  w.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Ficha ${esc(c.nombre)} ${fCond.mes}</title>
+  <style>body{font-family:Arial,sans-serif;font-size:12px;color:#222;margin:30px}h1{color:#1f4e79;font-size:20px;margin:0}h3{margin:18px 0 6px;color:#1f4e79}
+  table{width:100%;border-collapse:collapse}th{background:#1f4e79;color:#fff;padding:5px;text-align:left;font-size:11px}td{padding:4px 6px;border-bottom:1px solid #ddd}.n{text-align:right;white-space:nowrap}
+  .tot td{font-weight:bold;font-size:14px;border-top:2px solid #222}.cab{display:flex;justify-content:space-between}@media print{.np{display:none}}</style></head><body>
+  <p class="np"><button onclick="print()">Imprimir / Guardar PDF</button></p>
+  <div class="cab"><div><h1>Ficha mensual · ${esc(mesTexto(fCond.mes))}</h1>${esc(e.razon_social || '')}</div>
+  <div style="text-align:right"><b>${esc(c.nombre)}</b><br>DNI: ${esc(c.dni || '—')} · ${PUESTOS[c.puesto] || ''}<br>Viajes: ${L.viajes ?? 0}${L.ausencias ? '<br>Ausencias: ' + esc(L.ausencias) : ''}</div></div>
+  <h3>Resumen</h3><table>${fila('Nómina neta', L.neto_base)}${fila('+ Dietas', L.dietas)}${fila('+ Horas extra (' + num(L.horas_extra) + ' h)', L.horas_extra_importe)}${fila('+ Extras, pluses, bonus', L.extras)}
+  ${fila('− Anticipos', L.anticipos, 1)}${fila('− Gasolina del taller', L.combustible, 1)}${fila('− Otros descuentos', L.descuentos, 1)}<tr class="tot"><td>TOTAL A PAGAR</td><td class="n">${eur(L.total)}</td></tr></table>
+  ${det('Gasolina', comb, [['Fecha', (r) => fecha(r.fecha)], ['Dónde', (r) => esc(r.lugar || '')], ['Vehículo', (r) => esc(r.vehiculo || '')], ['Litros', (r) => (r.litros ? num(r.litros) : ''), 1], ['Importe', (r) => eur(r.importe), 1]])}
+  ${det('Anticipos', anti, [['Fecha', (r) => fecha(r.fecha)], ['Concepto', (r) => esc(r.concepto || '')], ['Importe', (r) => eur(r.importe), 1]])}
+  ${det('Extras y descuentos', conc, [['Tipo', (r) => (TIPOS_CONCEPTO.find((t) => t[0] === r.tipo) || [, r.tipo])[1]], ['Concepto', (r) => esc(r.concepto || '')], ['Importe', (r) => eur(r.importe), 1]])}
+  ${det('Dietas', diet, [['Fecha', (r) => fecha(r.fecha)], ['Tipo', (r) => esc(r.tipo)], ['Importe', (r) => eur(r.importe), 1]])}
+  ${det('Horas extra', horas, [['Fecha', (r) => fecha(r.fecha)], ['Horas', (r) => num(r.horas), 1], ['Notas', (r) => esc(r.notas || '')]])}
+  <p style="margin-top:40px">Firma del trabajador: ______________________</p></body></html>`);
+  w.document.close();
+}
+
+/* Pestañas de movimientos (gasolina, anticipos, extras, dietas, horas, ausencias) */
 async function subtablaConductor(id, tabla) {
   const cfg = SUBCOND[tabla]; const ini = fCond.mes + '-01'; const fin = finMes(ini);
   let qy = db().from(tabla).select('*').eq('conductor_id', id);
   if (cfg.filtro === 'rango') qy = qy.lte('desde', fin).gte('hasta', ini).order('desde');
-  else if (cfg.filtro === 'mes_nomina') qy = qy.eq('mes_nomina', ini).order('fecha');
+  else if (cfg.filtro === 'mes_nomina') qy = qy.eq('mes_nomina', ini).order(cfg.orden || 'fecha');
   else qy = qy.gte(cfg.filtro, ini).lte(cfg.filtro, fin).order(cfg.filtro);
   const filas = await q(qy);
-  const mostrar = (c, x) => (c[2] === 'date' ? fecha(x[c[0]]) : c[2] === 'month' ? (x[c[0]] ? mesTexto(x[c[0]].slice(0, 7)) : '') : c[2] === 'number' && c[0] === 'importe' ? eur(x[c[0]]) : esc(x[c[0]]));
+  const ops = (c) => c[2].map((o) => (Array.isArray(o) ? o : [o, o.replace('_', ' ')]));
+  const mostrar = (c, x) => (Array.isArray(c[2]) ? esc((ops(c).find((o) => o[0] === x[c[0]]) || [, x[c[0]]])[1]) : c[2] === 'date' ? fecha(x[c[0]]) : c[2] === 'month' ? (x[c[0]] ? mesTexto(x[c[0]].slice(0, 7)) : '')
+    : c[0] === 'importe' ? eur(x[c[0]]) : c[2] === 'number' ? num(x[c[0]]) : esc(x[c[0]]));
+  const defecto = (c) => (c[2] === 'month' ? fCond.mes : c[2] === 'date' && c[0] !== 'hasta' ? (hoy().startsWith(fCond.mes) ? hoy() : ini) : c[0] === 'lugar' ? 'Taller' : '');
   const entrada = (c) => Array.isArray(c[2])
-    ? `<select id="sc-${c[0]}">${c[2].map((o) => `<option>${o}</option>`).join('')}</select>`
-    : `<input id="sc-${c[0]}" type="${c[2] || 'text'}" ${c[2] === 'number' ? 'step="0.01"' : ''} value="${c[2] === 'month' ? fCond.mes : c[2] === 'date' && c[0] !== 'hasta' ? (hoy().startsWith(fCond.mes) ? hoy() : ini) : ''}">`;
-  const total = cfg.total ? filas.reduce((a, x) => a + Number(x[cfg.total] || 0), 0) : null;
-  return `<div class="barra"><div class="campo"><label>Mes</label><input type="month" id="sc-mes" value="${fCond.mes}" onchange="fCond.mes=this.value;editarConductor('${id}','${tabla}')"></div>
-    ${total != null ? `<p style="margin:0 0 8px">Total ${mesTexto(fCond.mes)}: <b>${cfg.total === 'importe' ? eur(total) : num(total) + ' h'}</b></p>` : ''}</div>
+    ? `<select id="sc-${c[0]}">${ops(c).map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>`
+    : `<input id="sc-${c[0]}" type="${c[2] || 'text'}" ${c[2] === 'number' ? 'step="0.01"' : ''} value="${defecto(c)}">`;
+  let total = cfg.total ? filas.reduce((a, x) => a + Number(x[cfg.total] || 0), 0) : null;
+  let txtTotal = total != null ? (cfg.total === 'importe' ? eur(total) : num(total) + ' h') : '';
+  if (tabla === 'nomina_conceptos') {
+    const suma = filas.filter((x) => !CONCEPTO_RESTA.includes(x.tipo)).reduce((a, x) => a + Number(x.importe), 0);
+    const resta = filas.filter((x) => CONCEPTO_RESTA.includes(x.tipo)).reduce((a, x) => a + Number(x.importe), 0);
+    txtTotal = `suma ${eur(suma)} · resta ${eur(resta)}`;
+  }
+  return `${cfg.ayuda ? `<p class="ayuda">${cfg.ayuda}</p>` : ''}
+  <div class="barra"><div class="campo"><label>Mes</label><input type="month" id="sc-mes" value="${fCond.mes}" onchange="fCond.mes=this.value;editarConductor('${id}','${tabla}')"></div>
+    ${txtTotal ? `<p style="margin:0 0 8px">Total ${mesTexto(fCond.mes)}: <b>${txtTotal}</b></p>` : ''}</div>
   <div class="tabla-wrap"><table><tr>${cfg.campos.map((c) => `<th>${c[1]}</th>`).join('')}<th></th></tr>
     ${filas.map((x) => `<tr>${cfg.campos.map((c) => `<td>${mostrar(c, x)}</td>`).join('')}<td><button class="sec peq" onclick="borrarFila('${tabla}','${x.id}', ${esc(JSON.stringify(`editarConductor('${id}','${tabla}')`))})">Quitar</button></td></tr>`).join('')}
     <tr>${cfg.campos.map((c) => `<td>${entrada(c)}</td>`).join('')}<td><button class="peq" onclick="anadirSub('${id}','${tabla}')">Añadir</button></td></tr>
@@ -1051,9 +1257,10 @@ async function anadirSub(id, tabla) {
   for (const c of SUBCOND[tabla].campos) {
     let v = val('sc-' + c[0]);
     if (c[2] === 'month' && v) v = v + '-01';
+    if (c[2] === 'number' && v != null) { v = leerNum(v); if (Number.isNaN(v)) return aviso(c[1] + ': número no válido', true); }
     reg[c[0]] = v;
   }
-  const faltan = SUBCOND[tabla].campos.filter((c) => !['notas', 'concepto'].includes(c[0]) && reg[c[0]] == null);
+  const faltan = SUBCOND[tabla].campos.filter((c) => !OPCIONALES.includes(c[0]) && reg[c[0]] == null);
   if (faltan.length) return aviso('Falta: ' + faltan.map((c) => c[1]).join(', '), true);
   await q(db().from(tabla).insert(reg)); aviso('Añadido'); editarConductor(id, tabla);
 }
@@ -1165,7 +1372,7 @@ async function datosGestoria() {
   const [gastos, facturas, nominas] = await Promise.all([
     q(db().from('v_gastos_gestoria').select('*').eq('mes', ini).order('fecha')),
     q(db().from('v_facturas').select('*').eq('estado', 'emitida').gte('fecha', ini).lte('fecha', fin).order('numero')),
-    q(db().from('v_resumen_nomina_mes').select('*').eq('mes', ini).order('conductor'))
+    q(db().rpc('liquidacion_mes', { p_mes: ini }))
   ]);
   return { gastos, facturas, nominas };
 }
@@ -1191,8 +1398,9 @@ async function pGestoria() {
     <div class="kpi"><div class="t">IVA repercutido − soportado</div><div class="n">${eur(sum(facturas, 'iva') - sum(gastos, 'iva'))}</div><div class="t">orientativo</div></div>
   </div>
   <h2>Datos para nóminas · ${mesTexto(fGest.mes)}</h2>
-  <div class="tabla-wrap"><table><tr><th>Conductor</th><th>DNI</th><th class="num">Viajes</th><th class="num">Dietas</th><th class="num">Horas extra</th><th class="num">Anticipos</th><th>Ausencias</th></tr>
-  ${nominas.map((n) => `<tr><td>${esc(n.conductor)}</td><td>${esc(n.dni)}</td><td class="num">${n.viajes}</td><td class="num">${eur(n.dietas)}</td><td class="num">${num(n.horas_extra)}</td><td class="num">${eur(n.anticipos)}</td><td>${esc(n.ausencias)}</td></tr>`).join('')}
+  <p class="ayuda">Viene de Personal → Nóminas del mes. Los anticipos, la gasolina y los descuentos son los que la gestoría tiene que descontar en la nómina.</p>
+  <div class="tabla-wrap"><table><tr><th>Empleado</th><th>DNI</th><th class="num">Viajes</th><th class="num">Neto</th><th class="num">Dietas</th><th class="num">H. extra</th><th class="num">Extras</th><th class="num">Anticipos</th><th class="num">Gasolina</th><th class="num">Descuentos</th><th class="num">A pagar</th><th>Ausencias</th></tr>
+  ${nominas.map((n) => `<tr><td>${esc(n.nombre)}</td><td>${esc(n.dni)}</td><td class="num">${n.viajes}</td><td class="num">${eur(n.neto_base)}</td><td class="num">${eur(n.dietas)}</td><td class="num">${num(n.horas_extra)} h</td><td class="num">${eur(n.extras)}</td><td class="num">${eur(n.anticipos)}</td><td class="num">${eur(n.combustible)}</td><td class="num">${eur(n.descuentos)}</td><td class="num"><b>${eur(n.total)}</b></td><td>${esc(n.ausencias)}</td></tr>`).join('')}
   </table>${nominas.length ? '' : '<div class="vacio">Sin datos de nómina este mes.</div>'}</div>`;
   $('#gs-mes').onchange = (e) => { fGest.mes = e.target.value; pGestoria(); };
 }
@@ -1203,7 +1411,7 @@ async function libroExcel(d) {
   const n2 = (x) => Math.round(Number(x || 0) * 100) / 100;
   hoja(d.facturas.map((f) => ({ 'Nº factura': f.codigo, Fecha: fecha(f.fecha), Cliente: f.cliente_nombre, CIF: (S.clientes.find((c) => c.id === f.cliente_id) || {}).cif || '', Base: n2(f.base), 'IVA %': n2(f.iva_pct), IVA: n2(f.iva), Total: n2(f.total), Vencimiento: fecha(f.vencimiento), Cobrado: n2(f.cobrado) })), 'Facturas emitidas');
   hoja(d.gastos.map((g) => ({ Fecha: fecha(g.fecha), Proveedor: g.proveedor || '', CIF: g.cif || '', 'Nº factura': g.num_factura || '', Categoría: CATEGORIAS[g.categoria] || g.categoria, Camión: g.matricula || '', Base: n2(g.base), 'IVA %': n2(g.iva_pct), IVA: n2(g.iva), Total: n2(g.total), 'Con documento': g.archivo_url ? 'Sí' : 'NO' })), 'Facturas recibidas');
-  hoja(d.nominas.map((n) => ({ Conductor: n.conductor, DNI: n.dni || '', Viajes: n.viajes, Dietas: n2(n.dietas), 'Horas extra': n2(n.horas_extra), Anticipos: n2(n.anticipos), Ausencias: n.ausencias || '' })), 'Nóminas');
+  hoja(d.nominas.map((n) => ({ Empleado: n.nombre, DNI: n.dni || '', Viajes: n.viajes, 'Neto nómina': n2(n.neto_base), Dietas: n2(n.dietas), 'Horas extra (h)': n2(n.horas_extra), 'Horas extra €': n2(n.horas_extra_importe), Extras: n2(n.extras), Anticipos: n2(n.anticipos), Gasolina: n2(n.combustible), Descuentos: n2(n.descuentos), 'A pagar': n2(n.total), Ausencias: n.ausencias || '' })), 'Nóminas');
   return wb;
 }
 async function descargarExcelGestoria() {

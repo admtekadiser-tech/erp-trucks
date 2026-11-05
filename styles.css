@@ -115,3 +115,7 @@ table.hoja tr.totales-fila td{background:#fafbfc;border-top:2px solid var(--bord
 table.hoja input:disabled,table.hoja select:disabled{background:#f6f7f9;color:var(--texto);border-color:transparent}
 input.ok{border-color:var(--verde);background:var(--verde-f)}
 input.mal{border-color:var(--rojo);background:var(--rojo-f)}
+
+/* Tablas de movimientos dentro de fichas */
+#modal table input,#modal table select{min-width:96px}
+#modal table input[type=date],#modal table input[type=month]{min-width:140px}
