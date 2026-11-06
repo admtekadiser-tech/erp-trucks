@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v0.5
+/* ERP TRUCKS CROS TRANSPORT · v0.6
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -184,52 +184,68 @@ async function pInicio() {
 }
 
 /* ---------------------------------------------------------------- VIAJES
-   Hoja tipo Excel: una fila por viaje (ruta + fecha + conductor). Los importes,
-   el Nº de expedición y los albaranes se escriben directamente en la tabla. */
-const fViajes = { desde: inicioMes(), hasta: hoy(), cliente: '', estado: 'sin_facturar', buscar: '' };
+   Hoja tipo Excel: una fila por viaje (ruta + fecha + conductor). El importe de ruta
+   lo pone la tarifa automáticamente; el resto se escribe directamente en la tabla. */
+const fViajes = { desde: inicioMes(), hasta: hoy(), cliente: '', factura: 'sin_facturar', precio: '', buscar: '', vista: 'viajes' };
+const selViajes = new Set();
+function barraViajes() {
+  return `<div class="barra">${[['viajes', 'Viajes'], ['tarifas', 'Tarifas']].map(([k, t]) =>
+    `<button class="${fViajes.vista === k ? '' : 'sec'}" onclick="fViajes.vista='${k}';pViajes()">${t}</button>`).join('')}</div>`;
+}
 async function pViajes() {
+  if (fViajes.vista === 'tarifas') return pTarifas();
   let qy = db().from('v_viajes').select('*').gte('fecha', fViajes.desde).lte('fecha', fViajes.hasta)
-    .order('fecha', { ascending: false }).order('ruta_nombre').limit(2000);
+    .order('fecha', { ascending: false }).order('ruta_nombre').limit(3000);
   if (fViajes.cliente === 'sin') qy = qy.is('cliente_id', null);
   else if (fViajes.cliente) qy = qy.eq('cliente_id', fViajes.cliente);
-  if (fViajes.estado === 'sin_facturar') qy = qy.is('factura_id', null).neq('estado', 'anulado');
-  else if (fViajes.estado) qy = qy.eq('estado', fViajes.estado);
-  let lista = await q(qy);
+  if (fViajes.factura === 'sin_facturar') qy = qy.is('factura_id', null).neq('estado', 'anulado');
+  else if (fViajes.factura === 'facturados') qy = qy.not('factura_id', 'is', null);
+  const [todos, imps] = await Promise.all([q(qy), q(db().from('importaciones').select('*').order('fecha', { ascending: false }).limit(1))]);
+  let lista = todos;
+  if (fViajes.precio === 'sin') lista = lista.filter((v) => v.importe_ruta == null && v.precio_manual == null);
   if (fViajes.buscar) {
     const b = fViajes.buscar.toLowerCase();
-    lista = lista.filter((v) => [v.ruta_nombre, v.num_expedicion, v.conductor_nombre, v.cliente_nombre, ...(v.detalle_clientes || []), ...(v.albaranes || [])]
+    lista = lista.filter((v) => [v.ruta_nombre, v.num_expedicion, v.conductor_nombre, v.cliente_nombre, v.tarifa_nombre, ...(v.detalle_clientes || []), ...(v.albaranes || [])]
       .some((x) => (x || '').toLowerCase().includes(b)));
   }
   pViajes.lista = lista;
+  [...selViajes].forEach((id) => { if (!lista.some((v) => v.id === id && !v.factura_id)) selViajes.delete(id); });
   const sinCliente = lista.filter((v) => !v.cliente_id && !v.factura_id);
+  const sinPrecio = todos.filter((v) => v.importe_ruta == null && v.precio_manual == null && !v.factura_id).length;
+  const ult = imps[0];
   $('#pagina').innerHTML = `
   <h1>Viajes</h1>
+  ${barraViajes()}
   <div class="barra">
     <div class="campo"><label>Desde</label><input type="date" id="fv-desde" value="${fViajes.desde}"></div>
     <div class="campo"><label>Hasta</label><input type="date" id="fv-hasta" value="${fViajes.hasta}"></div>
     <div class="campo"><label>Cliente</label><select id="fv-cliente">${opciones(S.clientes, fViajes.cliente, 'Todos').replace('<option value="">Todos</option>', `<option value="">Todos</option><option value="sin" ${fViajes.cliente === 'sin' ? 'selected' : ''}>— Sin cliente —</option>`)}</select></div>
-    <div class="campo"><label>Estado</label><select id="fv-estado">
-      ${[['sin_facturar', 'Sin facturar'], ['', 'Todos'], ['pendiente', 'Pendientes'], ['revisado', 'Revisados'], ['facturado', 'Facturados'], ['anulado', 'Anulados']].map(([k, t]) => `<option value="${k}" ${fViajes.estado === k ? 'selected' : ''}>${t}</option>`).join('')}
-    </select></div>
+    <div class="campo"><label>Facturación</label><select id="fv-factura">${[['sin_facturar', 'Sin facturar'], ['facturados', 'Ya facturados'], ['', 'Todos']].map(([k, t]) => `<option value="${k}" ${fViajes.factura === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Precio</label><select id="fv-precio">${[['', 'Todos'], ['sin', 'Sin precio']].map(([k, t]) => `<option value="${k}" ${fViajes.precio === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
     <div class="campo"><label>Buscar</label><input id="fv-buscar" value="${esc(fViajes.buscar)}" placeholder="Ruta, expedición, albarán…"></div>
   </div>
   <div class="barra">
-    <button class="sec" onclick="importarViajes()">⟳ Importar de TransControl</button>
-    <button class="sec" onclick="exportarViajesExcel()">⬇ Excel</button>
     <button onclick="editarViaje()">+ Viaje manual</button>
+    <button class="sec" onclick="importarViajes()">⟳ Importar ahora</button>
+    <button class="sec" onclick="recalcularPrecios()">↺ Recalcular precios</button>
+    <button class="sec" onclick="exportarViajesExcel()">⬇ Excel</button>
+    <button class="peligro" id="b-borrar-sel" onclick="borrarSeleccionados()" ${selViajes.size ? '' : 'disabled'}>🗑 Borrar seleccionados${selViajes.size ? ' (' + selViajes.size + ')' : ''}</button>
   </div>
+  <p class="ayuda">${ult ? `Última importación de TransControl: <b>${new Date(ult.fecha).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' })}</b> (${ult.origen === 'automatica' ? 'automática' : esc(ult.origen)}) · ${ult.viajes_nuevos} nuevos. ` : ''}Se importa sola todas las noches a las 23:00 (últimos 7 días).</p>
   ${sinCliente.length ? `<div class="alerta ambar">${sinCliente.length} viajes de esta lista no tienen cliente (a quién se factura).
     <select id="masivo-cliente" style="width:auto;margin-left:auto">${opciones(S.clientes, null, '— elegir cliente —')}</select>
     <button class="peq" onclick="asignarClienteMasivo()">Asignar a los ${sinCliente.length}</button></div>` : ''}
-  <p class="ayuda">${lista.length} viajes. Escribe los importes, el Nº de expedición y los albaranes directamente en la tabla: se guardan solos al salir de la casilla.
-  Al poner el cliente a una ruta, las próximas importaciones de esa ruta ya vendrán con ese cliente y con el último importe de ruta y peaje.</p>
+  ${sinPrecio && fViajes.precio !== 'sin' ? `<div class="alerta ambar">${sinPrecio} viajes sin facturar no tienen precio de ruta (no encajan en ninguna tarifa o el cliente manda prefactura).
+    <a href="javascript:void 0" style="margin-left:auto" onclick="fViajes.precio='sin';pViajes()">Ver cuáles</a></div>` : ''}
+  <p class="ayuda">${lista.length} viajes. El <b>importe de ruta</b> sale de la pestaña Tarifas; si lo cambias a mano queda fijo (pulsa ↺ para volver a la tarifa).
+  Lo demás (expedición, albaranes, manipulación, retornos, paralización, peaje) se escribe en la tabla y se guarda al salir de la casilla. ✎ abre el viaje completo y 🗑 lo borra.</p>
   <div class="tabla-wrap"><table class="hoja" id="t-viajes">
-    <tr><th>Fecha carga</th><th>Ruta</th><th>Nº expedición</th><th>Cliente (factura)</th><th>Detalle clientes</th><th>Detalle albaranes</th>
-      ${CONCEPTOS.map(([, t]) => `<th class="num">${t}</th>`).join('')}<th class="num">Total</th><th>Estado</th><th></th></tr>
+    <tr><th><input type="checkbox" style="width:auto" title="Seleccionar todos" onchange="selTodos(this.checked)"></th><th>Fecha carga</th><th>Ruta</th><th>Nº expedición</th><th>Cliente (factura)</th><th>Detalle clientes</th><th>Detalle albaranes</th>
+      ${CONCEPTOS.map(([, t]) => `<th class="num">${t}</th>`).join('')}<th class="num">Total</th><th>Factura</th><th></th></tr>
     ${lista.map(filaViaje).join('')}
-    ${lista.length ? `<tr class="totales-fila"><td colspan="6"><b>Total</b></td>${CONCEPTOS.map(([k]) => `<td class="num" id="tot-${k}"></td>`).join('')}<td class="num" id="tot-total"></td><td colspan="2"></td></tr>` : ''}
-  </table>${lista.length ? '' : '<div class="vacio">No hay viajes con estos filtros. Pulsa «Importar de TransControl».</div>'}</div>`;
-  ['desde', 'hasta', 'cliente', 'estado'].forEach((k) => { $('#fv-' + k).onchange = (e) => { fViajes[k] = e.target.value; pViajes(); }; });
+    ${lista.length ? `<tr class="totales-fila"><td colspan="7"><b>Total</b></td>${CONCEPTOS.map(([k]) => `<td class="num" id="tot-${k}"></td>`).join('')}<td class="num" id="tot-total"></td><td colspan="2"></td></tr>` : ''}
+  </table>${lista.length ? '' : '<div class="vacio">No hay viajes con estos filtros.</div>'}</div>`;
+  ['desde', 'hasta', 'cliente', 'factura', 'precio'].forEach((k) => { $('#fv-' + k).onchange = (e) => { fViajes[k] = e.target.value; pViajes(); }; });
   $('#fv-buscar').oninput = (e) => { fViajes.buscar = e.target.value; clearTimeout(pViajes.t); pViajes.t = setTimeout(() => { pViajes().then(() => { const b = $('#fv-buscar'); b.focus(); b.setSelectionRange(b.value.length, b.value.length); }); }, 350); };
   recalcularTotalesViajes();
 }
@@ -239,17 +255,22 @@ function filaViaje(v) {
   const albs = v.albaranes || [];
   const n = Math.max(clientes.length, albs.length, 1);
   const filas = Array.from({ length: n }, (_, i) => i);
-  return `<tr data-id="${v.id}" class="${v.estado === 'anulado' ? 'anulado' : ''}">
-    <td>${fecha(v.fecha)}<br><small>${esc(v.conductor_nombre)}</small></td>
+  const rutaImp = v.importe_ruta ?? v.precio_manual;
+  const infoTarifa = v.precio_auto
+    ? (v.tarifa_nombre ? `<small title="Tarifa aplicada">${esc(v.tarifa_nombre)}</small>` : '<small style="color:var(--rojo)">sin tarifa</small>')
+    : `<small>a mano ${dis ? '' : `<a href="javascript:void 0" title="Volver a la tarifa automática" onclick="volverTarifa('${v.id}')">↺</a>`}</small>`;
+  return `<tr data-id="${v.id}">
+    <td>${v.factura_id ? '' : `<input type="checkbox" style="width:auto" class="c-sel" ${selViajes.has(v.id) ? 'checked' : ''} onchange="marcarSel('${v.id}',this.checked)">`}</td>
+    <td>${fecha(v.fecha)}${v.hora_inicio ? ' <small>' + v.hora_inicio.slice(0, 5) + '</small>' : ''}<br><small>${esc(v.conductor_nombre)}</small></td>
     <td><b>${esc(v.ruta_nombre || '—')}</b></td>
     <td><input class="c-exp" value="${esc(v.num_expedicion)}" ${dis} onchange="guardarCelda(this,'num_expedicion')"></td>
     <td><select class="c-cli" ${dis} onchange="guardarCelda(this,'cliente_id')">${opciones(S.clientes, v.cliente_id, '— sin cliente —')}</select></td>
     <td class="lineas">${filas.map((i) => `<div>${esc(clientes[i] || '')}</div>`).join('')}</td>
     <td class="lineas">${filas.map((i) => `<div><input class="c-alb" value="${esc(albs[i] || '')}" ${dis} onchange="guardarCelda(this,'albaranes')"></div>`).join('')}</td>
-    ${CONCEPTOS.map(([k]) => `<td class="num"><input class="c-imp" data-campo="${k}" inputmode="decimal" value="${numCampo(k === 'importe_ruta' ? (v.importe_ruta ?? v.precio_manual) : v[k])}" ${dis} onchange="guardarCelda(this,'${k}')"></td>`).join('')}
+    ${CONCEPTOS.map(([k]) => `<td class="num"><input class="c-imp" data-campo="${k}" inputmode="decimal" value="${numCampo(k === 'importe_ruta' ? rutaImp : v[k])}" ${dis} onchange="guardarCelda(this,'${k}')">${k === 'importe_ruta' ? '<br>' + infoTarifa : ''}</td>`).join('')}
     <td class="num c-total"><b>${eur(v.importe)}</b></td>
-    <td>${v.factura_codigo ? et('verde', v.factura_codigo) : v.factura_id ? et('azul', 'En borrador') : et(ESTADO_VIAJE[v.estado], v.estado)}</td>
-    <td><button class="sec peq" title="Abrir ficha del viaje" onclick="editarViaje('${v.id}')">✎</button></td>
+    <td>${v.factura_codigo ? et('verde', v.factura_codigo) : v.factura_id ? et('azul', 'En borrador') : '<span style="color:var(--gris)">—</span>'}</td>
+    <td style="white-space:nowrap"><button class="sec peq" title="Editar el viaje" onclick="editarViaje('${v.id}')">✎</button>${v.factura_id ? '' : ` <button class="sec peq" title="Borrar el viaje" onclick="borrarViaje('${v.id}')">🗑</button>`}</td>
   </tr>`;
 }
 async function guardarCelda(el, campo) {
@@ -264,39 +285,70 @@ async function guardarCelda(el, campo) {
     el.classList.remove('mal');
     el.value = numCampo(valor);
   } else valor = el.value.trim() || null;
+  const cambio = { [campo]: valor };
+  if (campo === 'importe_ruta') cambio.precio_auto = false; // a mano: la tarifa ya no lo cambia
   try {
-    await q(db().from('viajes').update({ [campo]: valor }).eq('id', id));
+    await q(db().from('viajes').update(cambio).eq('id', id));
     const v = pViajes.lista.find((x) => x.id === id);
-    if (v) { v[campo] = valor; if (campo === 'cliente_id') v.cliente_nombre = (S.clientes.find((c) => c.id === valor) || {}).nombre; }
+    if (v) { Object.assign(v, cambio); if (campo === 'cliente_id') v.cliente_nombre = (S.clientes.find((c) => c.id === valor) || {}).nombre; }
     el.classList.add('ok'); setTimeout(() => el.classList.remove('ok'), 900);
+    if (campo === 'cliente_id' && v && v.precio_auto) { await q(db().rpc('recalcular_tarifas', { p_desde: v.fecha, p_hasta: v.fecha, p_ids: [id] })); return pViajes(); }
     if (campo.startsWith('importe_')) {
       const total = [...tr.querySelectorAll('.c-imp')].reduce((a, x) => a + (leerNum(x.value) || 0), 0);
       if (v) v.importe = total;
       tr.querySelector('.c-total').innerHTML = `<b>${eur(total)}</b>`;
+      if (campo === 'importe_ruta') { const s = el.parentElement.querySelector('small'); if (s) s.outerHTML = `<small>a mano <a href="javascript:void 0" title="Volver a la tarifa automática" onclick="volverTarifa('${id}')">↺</a></small>`; }
       recalcularTotalesViajes();
     }
   } catch { el.classList.add('mal'); }
+}
+async function volverTarifa(id) {
+  const v = pViajes.lista.find((x) => x.id === id);
+  await q(db().from('viajes').update({ precio_auto: true, precio_manual: null }).eq('id', id));
+  await q(db().rpc('recalcular_tarifas', { p_desde: v.fecha, p_hasta: v.fecha, p_ids: [id] }));
+  aviso('Precio de tarifa aplicado'); pViajes();
 }
 function recalcularTotalesViajes() {
   const t = $('#t-viajes'); if (!t || !$('#tot-total')) return;
   let total = 0;
   CONCEPTOS.forEach(([k]) => {
-    const s = [...t.querySelectorAll(`tr:not(.anulado) .c-imp[data-campo="${k}"]`)].reduce((a, x) => a + (leerNum(x.value) || 0), 0);
+    const s = [...t.querySelectorAll(`.c-imp[data-campo="${k}"]`)].reduce((a, x) => a + (leerNum(x.value) || 0), 0);
     total += s; $('#tot-' + k).textContent = eur(s);
   });
   $('#tot-total').innerHTML = `<b>${eur(total)}</b>`;
+}
+function marcarSel(id, on) {
+  if (on) selViajes.add(id); else selViajes.delete(id);
+  const b = $('#b-borrar-sel'); b.disabled = !selViajes.size; b.textContent = '🗑 Borrar seleccionados' + (selViajes.size ? ` (${selViajes.size})` : '');
+}
+function selTodos(on) { document.querySelectorAll('#t-viajes .c-sel').forEach((c) => { c.checked = on; marcarSel(c.closest('tr').dataset.id, on); }); }
+async function borrarSeleccionados() {
+  const ids = [...selViajes];
+  if (!ids.length || !confirm(`¿Borrar ${ids.length} viajes? Los que vienen de TransControl no volverán a importarse.`)) return;
+  const n = await q(db().rpc('borrar_viajes', { p_ids: ids }));
+  selViajes.clear(); aviso(`${n} viajes borrados`); pViajes();
+}
+async function borrarViaje(id) {
+  if (!confirm('¿Borrar este viaje? Si viene de TransControl no volverá a importarse.')) return;
+  await q(db().rpc('borrar_viajes', { p_ids: [id] }));
+  selViajes.delete(id); cerrarModal(); aviso('Viaje borrado'); pViajes();
+}
+async function recalcularPrecios() {
+  const n = await q(db().rpc('recalcular_tarifas', { p_desde: fViajes.desde, p_hasta: fViajes.hasta }));
+  aviso(`Precios recalculados en ${n} viajes (los puestos a mano y los facturados no se tocan)`); pViajes();
 }
 async function asignarClienteMasivo() {
   const c = val('masivo-cliente');
   if (!c) return aviso('Elige el cliente', true);
   const ids = pViajes.lista.filter((v) => !v.cliente_id && !v.factura_id).map((v) => v.id);
   await q(db().from('viajes').update({ cliente_id: c }).in('id', ids));
+  await q(db().rpc('recalcular_tarifas', { p_desde: fViajes.desde, p_hasta: fViajes.hasta, p_ids: ids }));
   aviso(`${ids.length} viajes asignados`); pViajes();
 }
 
 async function exportarViajesExcel() {
   await cargarScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
-  const lista = [...pViajes.lista].filter((v) => v.estado !== 'anulado').sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.ruta_nombre || '').localeCompare(b.ruta_nombre || ''));
+  const lista = [...pViajes.lista].sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.ruta_nombre || '').localeCompare(b.ruta_nombre || ''));
   const filas = [];
   for (const v of lista) {
     const cli = v.detalle_clientes || []; const alb = v.albaranes || [];
@@ -316,67 +368,79 @@ async function exportarViajesExcel() {
 
 function importarViajes() {
   modal(`<h1>Importar viajes de TransControl</h1>
-  <p class="ayuda">Trae todos los viajes que han registrado los conductores, con el detalle de clientes de cada descarga.
-  Los viajes ya importados no se duplican. TransControl no se modifica.</p>
-  <div class="rejilla"><div><label>Desde</label><input type="date" id="i-desde" value="${sumarDias(hoy(), -60)}"></div>
+  <p class="ayuda">El ERP ya importa solo cada noche a las 23:00 los últimos 7 días. Usa esto si quieres traer los viajes ahora o un periodo más largo.
+  Los viajes ya importados no se duplican (se actualizan sus paradas si no están facturados) y los borrados no vuelven. TransControl no se modifica.</p>
+  <div class="rejilla"><div><label>Desde</label><input type="date" id="i-desde" value="${sumarDias(hoy(), -7)}"></div>
   <div><label>Hasta</label><input type="date" id="i-hasta" value="${hoy()}"></div></div>
   <div class="acciones"><button class="sec" onclick="cerrarModal()">Cancelar</button><button id="b-imp" onclick="hacerImportacion()">Importar</button></div>`);
 }
 async function hacerImportacion() {
   $('#b-imp').disabled = true; $('#b-imp').textContent = 'Importando…';
   try {
-    const r = await q(db().rpc('importar_viajes_transcontrol', { p_desde: val('i-desde'), p_hasta: val('i-hasta') }));
+    const r = await q(db().rpc('importar_viajes_transcontrol', { p_desde: val('i-desde'), p_hasta: val('i-hasta'), p_origen: 'manual' }));
     const x = r[0] || {}; cerrarModal(); await recargarMaestros();
-    aviso(`${x.viajes_nuevos} viajes nuevos importados`);
+    aviso(`${x.viajes_nuevos} viajes nuevos${x.viajes_actualizados ? ' · ' + x.viajes_actualizados + ' actualizados' : ''}`);
     pintar();
   } catch { $('#b-imp').disabled = false; $('#b-imp').textContent = 'Importar'; }
 }
 
 async function editarViaje(id) {
-  const v = id ? await q(db().from('viajes').select('*').eq('id', id).single()) : { fecha: hoy(), num_entregas: 1, num_paradas: 0, estado: 'pendiente' };
+  const v = id ? await q(db().from('v_viajes').select('*').eq('id', id).single()) : { fecha: hoy(), num_entregas: 1, num_paradas: 0, precio_auto: true };
   const rutas = await q(db().from('rutas').select('id,nombre,cliente_id').eq('ignorar', false).order('nombre'));
-  editarViaje.rutas = rutas;
+  editarViaje.rutas = rutas; editarViaje.v = v;
   const ruta = rutas.find((r) => r.id === v.ruta_id);
   const bloqueado = !!v.factura_id;
   const dis = bloqueado ? 'disabled' : '';
   const imp = (k) => (k === 'importe_ruta' ? (v.importe_ruta ?? v.precio_manual) : v[k]);
   modal(`<h1>${id ? 'Viaje del ' + fecha(v.fecha) : 'Nuevo viaje manual'}</h1>
-  ${bloqueado ? '<p class="ayuda">Este viaje ya está en una factura: no se puede modificar.</p>' : ''}
-  ${v.transcontrol_id ? `<p class="ayuda">Importado de TransControl · ${v.num_entregas} puntos de descarga</p>` : ''}
+  ${bloqueado ? `<p class="ayuda">Este viaje ya está en la factura ${esc(v.factura_codigo || '(borrador)')}: no se puede modificar ni borrar.</p>` : ''}
+  ${v.transcontrol_id ? `<p class="ayuda">Importado de TransControl · ${v.num_entregas} ${v.num_entregas === 1 ? 'descarga' : 'descargas'}${v.hora_inicio ? ' · empezó a las ' + v.hora_inicio.slice(0, 5) : ''}</p>` : ''}
   <div class="rejilla">
     <div><label>Fecha carga</label><input type="date" id="v-fecha" value="${v.fecha}" ${dis}></div>
     <div><label>Ruta</label><input id="v-ruta" list="l-rutas" value="${esc(ruta?.nombre)}" placeholder="Escribe o elige" ${dis}>
       <datalist id="l-rutas">${rutas.map((r) => `<option value="${esc(r.nombre)}">`).join('')}</datalist></div>
     <div><label>Nº expedición</label><input id="v-exp" value="${esc(v.num_expedicion)}" ${dis}></div>
-    <div><label>Cliente (a quién se factura)</label><select id="v-cliente" ${dis}>${opciones(S.clientes, v.cliente_id)}</select></div>
+    <div><label>Cliente (a quién se factura)</label><select id="v-cliente" ${dis} onchange="ayudasExtra()">${opciones(S.clientes, v.cliente_id)}</select></div>
     <div><label>Conductor</label><select id="v-conductor" ${dis}>${opciones(S.conductores, v.conductor_id, '—')}</select></div>
     <div><label>Tractora / camión</label><select id="v-tractora" ${dis}>${opciones(S.vehiculos, v.tractora_id, '—', (x) => x.matricula + ' · ' + x.tipo)}</select></div>
   </div>
   <div class="rejilla">
-    <div><label>Detalle clientes (uno por línea)</label><textarea id="v-detalle" rows="4" ${dis}>${esc((v.detalle_clientes || []).join('\n'))}</textarea></div>
+    <div><label>Detalle clientes (uno por línea · cada línea es una parada)</label><textarea id="v-detalle" rows="4" ${dis}>${esc((v.detalle_clientes || []).join('\n'))}</textarea></div>
     <div><label>Detalle albaranes (uno por línea, en el mismo orden)</label><textarea id="v-albaranes" rows="4" ${dis}>${esc((v.albaranes || []).join('\n'))}</textarea></div>
   </div>
   <div class="rejilla">
-    ${CONCEPTOS.map(([k, t]) => `<div><label>${t} €</label><input id="v-${k}" inputmode="decimal" value="${numCampo(imp(k))}" ${dis} oninput="totalFichaViaje()"></div>`).join('')}
+    ${CONCEPTOS.map(([k, t]) => `<div><label>${t} €</label><input id="v-${k}" inputmode="decimal" value="${numCampo(imp(k))}" ${dis} oninput="${k === 'importe_ruta' ? "$('#v-auto').checked=false;" : ''}totalFichaViaje()"></div>`).join('')}
   </div>
+  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="v-auto" style="width:auto" ${v.precio_auto ? 'checked' : ''} ${dis}>
+    Importe de ruta según tarifa ${v.tarifa_nombre ? '(' + esc(v.tarifa_nombre) + ')' : ''} — al guardar se recalcula con las paradas y el cliente</label>
+  <div id="v-ayudas" class="barra" style="margin-top:10px"></div>
   <div class="rejilla">
     <div><label>Km</label><input type="number" id="v-km" value="${v.km ?? ''}" ${dis}></div>
-    <div><label>Estado</label><select id="v-estado" ${dis}>${['pendiente', 'revisado', 'anulado'].concat(bloqueado ? ['facturado'] : []).map((e) => `<option ${v.estado === e ? 'selected' : ''}>${e}</option>`).join('')}</select></div>
   </div>
   <label>Notas</label><textarea id="v-notas" ${dis}>${esc(v.notas)}</textarea>
   <p style="text-align:right;font-size:17px">Total del viaje: <b id="v-total"></b></p>
   <div class="acciones">
-    ${id && !bloqueado && !v.transcontrol_id ? `<button class="peligro izq" onclick="borrarViaje('${id}')">Borrar</button>` : ''}
+    ${id && !bloqueado ? `<button class="peligro izq" onclick="borrarViaje('${id}')">Borrar viaje</button>` : ''}
     <button class="sec" onclick="cerrarModal()">${bloqueado ? 'Cerrar' : 'Cancelar'}</button>
     ${bloqueado ? '' : `<button onclick="guardarViaje(${id ? `'${id}'` : ''})">Guardar</button>`}
   </div>`);
-  totalFichaViaje();
+  totalFichaViaje(); if (!bloqueado) ayudasExtra();
+}
+// Atajos con los precios del cliente: horas de paralización, manipulación, devolución
+function ayudasExtra() {
+  const c = S.clientes.find((x) => x.id === val('v-cliente')) || {};
+  const h = c.precio_hora_paralizacion, m = c.precio_manipulacion, d = c.precio_devolucion;
+  $('#v-ayudas').innerHTML = (h || m || d) ? `
+    ${h ? `<div class="campo" style="min-width:0"><label>Horas de paralización × ${eur(h)}</label><input type="number" step="0.25" min="0" id="v-horas" style="width:110px" oninput="$('#v-importe_paralizacion').value=numCampo(Math.round((leerNum(this.value)||0)*${h}*100)/100);totalFichaViaje()"></div>` : ''}
+    ${m ? `<button class="sec peq" type="button" onclick="$('#v-importe_manipulacion').value=numCampo(${m});totalFichaViaje()">+ Manipulación (${eur(m)})</button>` : ''}
+    ${d ? `<button class="sec peq" type="button" onclick="$('#v-importe_retorno').value=numCampo((leerNum($('#v-importe_retorno').value)||0)+${d});totalFichaViaje()">+ Devolución (${eur(d)})</button>` : ''}` : '';
 }
 function totalFichaViaje() { $('#v-total').textContent = eur(CONCEPTOS.reduce((a, [k]) => a + (leerNum($('#v-' + k).value) || 0), 0)); }
 async function guardarViaje(id) {
+  const v0 = editarViaje.v || {};
   const reg = {
     fecha: val('v-fecha'), num_expedicion: val('v-exp'), cliente_id: val('v-cliente'), conductor_id: val('v-conductor'),
-    tractora_id: val('v-tractora'), km: val('v-km'), estado: val('v-estado'), notas: val('v-notas')
+    tractora_id: val('v-tractora'), km: val('v-km'), notas: val('v-notas'), precio_auto: val('v-auto')
   };
   if (!reg.fecha) return aviso('La fecha es obligatoria', true);
   for (const [k, t] of CONCEPTOS) {
@@ -384,11 +448,13 @@ async function guardarViaje(id) {
     if (Number.isNaN(n)) return aviso(`${t}: importe no válido`, true);
     reg[k] = n;
   }
+  if (!reg.precio_auto) reg.precio_manual = null;
   const det = lineas($('#v-detalle').value); const alb = lineas($('#v-albaranes').value);
   while (det.length && !det[det.length - 1]) det.pop();
   while (alb.length && !alb[alb.length - 1]) alb.pop();
   reg.detalle_clientes = det.length ? det : null;
   reg.albaranes = alb.some(Boolean) ? alb : null;
+  if (JSON.stringify(reg.detalle_clientes || []) !== JSON.stringify(v0.detalle_clientes || [])) { reg.detalle_manual = true; reg.num_entregas = Math.max(det.filter(Boolean).length, 1); reg.num_paradas = Math.max(reg.num_entregas - 1, 0); }
   const nombreRuta = val('v-ruta');
   if (nombreRuta) {
     let r = editarViaje.rutas.find((x) => x.nombre.toLowerCase() === nombreRuta.toLowerCase());
@@ -396,10 +462,87 @@ async function guardarViaje(id) {
     reg.ruta_id = r.id;
   } else reg.ruta_id = null;
   if (id) await q(db().from('viajes').update(reg).eq('id', id));
-  else await q(db().from('viajes').insert(reg));
-  aviso('Viaje guardado'); cerrarModal(); pintar();
+  else id = (await q(db().from('viajes').insert(reg).select('id').single())).id;
+  if (reg.precio_auto) await q(db().rpc('recalcular_tarifas', { p_desde: reg.fecha, p_hasta: reg.fecha, p_ids: [id] }));
+  aviso('Viaje guardado'); cerrarModal(); pViajes();
 }
-async function borrarViaje(id) { if (!confirm('¿Borrar este viaje?')) return; await q(db().from('viajes').delete().eq('id', id)); cerrarModal(); pintar(); }
+
+/* ---------------------------------------------------------------- TARIFAS DE VIAJES */
+const TF_DIA = { '': 'Cualquier día', laborable: 'Lunes a viernes', sabado: 'Sábado', domingo: 'Domingo' };
+const TF_FRANJA = { '': 'Cualquier hora', diurna: 'De día', nocturna: 'Nocturna (21:00–05:00)' };
+const TF_MODO = { fijo: 'Precio por viaje', paradas: 'Según nº de paradas', por_unidad: 'Por unidad (cada lanzadera)' };
+async function pTarifas() {
+  const lista = await q(db().from('tarifas_viaje').select('*').order('orden').order('nombre'));
+  const cli = (id) => (S.clientes.find((c) => c.id === id) || {}).nombre || '';
+  const selO = (cls, obj, v) => `<select class="${cls}">${Object.entries(obj).map(([k, t]) => `<option value="${k}" ${String(v ?? '') === k ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
+  const fila = (t) => `<tr data-id="${t.id || ''}" class="${t.activo === false ? 'anulado' : ''}">
+    <td><input class="tf-orden" type="number" value="${t.orden ?? 100}" style="width:64px;min-width:0"></td>
+    <td><input class="tf-nombre" value="${esc(t.nombre)}" style="min-width:170px"></td>
+    <td><select class="tf-cliente">${opciones(S.clientes, t.cliente_id, '— cualquiera —')}</select></td>
+    <td><input class="tf-ruta" value="${esc(t.ruta_contiene)}" placeholder="(cualquiera)"></td>
+    <td><input class="tf-parada" value="${esc(t.parada_contiene)}" placeholder="(cualquiera)"></td>
+    <td>${selO('tf-dia', TF_DIA, t.dia)}</td><td>${selO('tf-franja', TF_FRANJA, t.franja)}</td><td>${selO('tf-modo', TF_MODO, t.modo || 'fijo')}</td>
+    <td><input class="tf-precio" inputmode="decimal" value="${numCampo(t.precio)}" placeholder="a mano"></td>
+    <td><input class="tf-precio2" inputmode="decimal" value="${numCampo(t.precio_2)}"></td>
+    <td><input class="tf-extra" inputmode="decimal" value="${numCampo(t.precio_extra)}"></td>
+    <td><input class="tf-activo" type="checkbox" style="width:auto;min-width:0" ${t.activo === false ? '' : 'checked'}></td>
+    <td><input class="tf-notas" value="${esc(t.notas)}"></td>
+    <td style="white-space:nowrap"><button class="peq" onclick="guardarTarifaViaje(this)">Guardar</button> ${t.id ? `<button class="sec peq" onclick="borrarTarifaViaje('${t.id}')">🗑</button>` : ''}</td></tr>`;
+  $('#pagina').innerHTML = `
+  <h1>Viajes</h1>
+  ${barraViajes()}
+  <p class="ayuda">Cada viaje toma la <b>primera tarifa de la lista (por orden) que encaja</b> con su cliente, su ruta, sus paradas, el día y la hora. Esa tarifa pone el importe de ruta y, si el viaje no tiene cliente, también el cliente.
+  <br><b>Ruta contiene</b> y <b>Parada contiene</b>: textos separados por comas (da igual mayúsculas o tildes). <b>Precio vacío</b> = el cliente manda prefactura y el precio se pone a mano.
+  <br><b>Según nº de paradas</b>: 1 parada = Precio · 2 paradas = Precio 2 paradas · cada parada de más suma «Extra por parada». <b>Precio por viaje</b>: el «Extra» se suma por cada parada a partir de la segunda.
+  <br>Después de cambiar tarifas, pulsa <b>↺ Recalcular precios</b> en Viajes (no toca los puestos a mano ni los facturados).</p>
+  <div class="barra"><button onclick="nuevaTarifaViaje()">+ Nueva tarifa</button></div>
+  <div class="tabla-wrap"><table class="hoja" id="t-tarifas">
+    <tr><th>Orden</th><th>Nombre</th><th>Cliente</th><th>Ruta contiene</th><th>Parada contiene</th><th>Día</th><th>Hora</th><th>Cómo se cobra</th><th class="num">Precio €</th><th class="num">2 paradas €</th><th class="num">Extra por parada €</th><th>Activa</th><th>Notas</th><th></th></tr>
+    ${lista.map(fila).join('')}
+  </table></div>
+  <h2>Extras por cliente</h2>
+  <p class="ayuda">Salen como atajos al editar un viaje: horas de paralización × precio, manipulación y devolución.</p>
+  <div class="tabla-wrap"><table class="hoja"><tr><th>Cliente</th><th class="num">Hora de paralización €</th><th class="num">Manipulación €</th><th class="num">Devolución €</th><th></th></tr>
+    ${S.clientes.map((c) => `<tr data-id="${c.id}"><td><b>${esc(c.nombre)}</b></td>
+      <td class="num"><input class="cx-h" inputmode="decimal" value="${numCampo(c.precio_hora_paralizacion)}"></td>
+      <td class="num"><input class="cx-m" inputmode="decimal" value="${numCampo(c.precio_manipulacion)}"></td>
+      <td class="num"><input class="cx-d" inputmode="decimal" value="${numCampo(c.precio_devolucion)}"></td>
+      <td><button class="peq" onclick="guardarExtrasCliente(this)">Guardar</button></td></tr>`).join('')}
+  </table></div>`;
+  pTarifas.fila = fila;
+}
+function nuevaTarifaViaje() {
+  const tb = $('#t-tarifas tbody') || $('#t-tarifas');
+  tb.insertAdjacentHTML('beforeend', pTarifas.fila({ orden: 100, modo: 'fijo', dia: '', franja: '', activo: true }));
+  tb.lastElementChild.querySelector('.tf-nombre').focus();
+}
+async function guardarTarifaViaje(btn) {
+  const tr = btn.closest('tr'); const g = (c) => tr.querySelector('.' + c);
+  const num = (c) => { const n = leerNum(g(c).value); if (Number.isNaN(n)) throw new Error(c); return n; };
+  let reg;
+  try {
+    reg = { orden: Number(g('tf-orden').value || 100), nombre: g('tf-nombre').value.trim(), cliente_id: g('tf-cliente').value || null,
+      ruta_contiene: g('tf-ruta').value.trim() || null, parada_contiene: g('tf-parada').value.trim() || null,
+      dia: g('tf-dia').value, franja: g('tf-franja').value, modo: g('tf-modo').value,
+      precio: num('tf-precio'), precio_2: num('tf-precio2'), precio_extra: num('tf-extra'), activo: g('tf-activo').checked, notas: g('tf-notas').value.trim() || null };
+  } catch { return aviso('Hay un precio no válido en esa fila', true); }
+  if (!reg.nombre) return aviso('Ponle un nombre a la tarifa', true);
+  if (tr.dataset.id) await q(db().from('tarifas_viaje').update(reg).eq('id', tr.dataset.id));
+  else tr.dataset.id = (await q(db().from('tarifas_viaje').insert(reg).select('id').single())).id;
+  aviso('Tarifa guardada. Pulsa «↺ Recalcular precios» en Viajes para aplicarla.'); pTarifas();
+}
+async function borrarTarifaViaje(id) {
+  if (!confirm('¿Borrar esta tarifa? Los viajes que ya tienen precio no cambian hasta que recalcules.')) return;
+  await q(db().from('viajes').update({ tarifa_id: null }).eq('tarifa_id', id));
+  await q(db().from('tarifas_viaje').delete().eq('id', id)); aviso('Tarifa borrada'); pTarifas();
+}
+async function guardarExtrasCliente(btn) {
+  const tr = btn.closest('tr'); const g = (c) => leerNum(tr.querySelector('.' + c).value);
+  const reg = { precio_hora_paralizacion: g('cx-h'), precio_manipulacion: g('cx-m'), precio_devolucion: g('cx-d') };
+  if (Object.values(reg).some(Number.isNaN)) return aviso('Importe no válido', true);
+  await q(db().from('clientes').update(reg).eq('id', tr.dataset.id));
+  await recargarMaestros(); aviso('Extras del cliente guardados');
+}
 
 /* ---------------------------------------------------------------- TARIFAS (solo recargo de gasoil por cliente) */
 function tablaTarifas(lista, recargar) {

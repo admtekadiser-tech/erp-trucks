@@ -119,3 +119,7 @@ input.mal{border-color:var(--rojo);background:var(--rojo-f)}
 /* Tablas de movimientos dentro de fichas */
 #modal table input,#modal table select{min-width:96px}
 #modal table input[type=date],#modal table input[type=month]{min-width:140px}
+#t-tarifas select{min-width:140px}
+#t-tarifas input{min-width:90px}
+#t-tarifas .tf-orden{min-width:60px}
+#t-tarifas input::placeholder{color:#b8c0ca;font-style:italic}
