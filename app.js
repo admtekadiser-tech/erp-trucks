@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v0.6
+/* ERP TRUCKS CROS TRANSPORT · v1.1
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -193,6 +193,8 @@ function barraViajes() {
     `<button class="${fViajes.vista === k ? '' : 'sec'}" onclick="fViajes.vista='${k}';pViajes()">${t}</button>`).join('')}</div>`;
 }
 async function pViajes() {
+  if (!fViajes.desde) fViajes.desde = inicioMes();
+  if (!fViajes.hasta) fViajes.hasta = hoy();
   if (fViajes.vista === 'tarifas') return pTarifas();
   let qy = db().from('v_viajes').select('*').gte('fecha', fViajes.desde).lte('fecha', fViajes.hasta)
     .order('fecha', { ascending: false }).order('ruta_nombre').limit(3000);
@@ -227,11 +229,12 @@ async function pViajes() {
   <div class="barra">
     <button onclick="editarViaje()">+ Viaje manual</button>
     <button class="sec" onclick="importarViajes()">⟳ Importar ahora</button>
+    <button class="sec" onclick="subirCsvLactalis()">⬆ Subir CSV Lactalis</button>
     <button class="sec" onclick="recalcularPrecios()">↺ Recalcular precios</button>
     <button class="sec" onclick="exportarViajesExcel()">⬇ Excel</button>
     <button class="peligro" id="b-borrar-sel" onclick="borrarSeleccionados()" ${selViajes.size ? '' : 'disabled'}>🗑 Borrar seleccionados${selViajes.size ? ' (' + selViajes.size + ')' : ''}</button>
   </div>
-  <p class="ayuda">${ult ? `Última importación de TransControl: <b>${new Date(ult.fecha).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' })}</b> (${ult.origen === 'automatica' ? 'automática' : esc(ult.origen)}) · ${ult.viajes_nuevos} nuevos. ` : ''}Se importa sola todas las noches a las 23:00 (últimos 7 días).</p>
+  <p class="ayuda">${ult ? `Última importación de TransControl: <b>${new Date(ult.fecha).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' })}</b> (${ult.origen === 'automatica' ? 'automática' : esc(ult.origen)}) · ${ult.viajes_nuevos} nuevos. ` : ''}Se importa sola cada hora (últimos 7 días). Lactalis: sube sus CSV con «⬆ Subir CSV Lactalis».</p>
   ${sinCliente.length ? `<div class="alerta ambar">${sinCliente.length} viajes de esta lista no tienen cliente (a quién se factura).
     <select id="masivo-cliente" style="width:auto;margin-left:auto">${opciones(S.clientes, null, '— elegir cliente —')}</select>
     <button class="peq" onclick="asignarClienteMasivo()">Asignar a los ${sinCliente.length}</button></div>` : ''}
@@ -354,7 +357,7 @@ async function exportarViajesExcel() {
     const cli = v.detalle_clientes || []; const alb = v.albaranes || [];
     const n = Math.max(cli.length, alb.length, 1);
     for (let i = 0; i < n; i++) {
-      const f = { RUTA: v.ruta_nombre || '', 'Nº EXPEDICION': v.num_expedicion || '', 'FECHA CARGA': fecha(v.fecha), 'DETALLE CLIENTES': cli[i] || '', 'DETALLE ALBARANES': alb[i] || '' };
+      const f = { RUTA: (v.ruta_nombre || '').replace(/^RUTA\s+/i, ''), 'Nº EXPEDICION': v.num_expedicion || '', 'FECHA CARGA': fecha(v.fecha), 'DETALLE CLIENTES': cli[i] || '', 'DETALLE ALBARANES': alb[i] || '' };
       // los importes van solo en la primera fila de cada viaje para que la suma no se duplique
       CONCEPTOS.forEach(([k, , col]) => { const x = k === 'importe_ruta' ? (v.importe_ruta ?? v.precio_manual) : v[k]; f[col] = i === 0 && x != null ? Number(x) : ''; });
       filas.push(f);
@@ -364,6 +367,26 @@ async function exportarViajesExcel() {
   ws['!cols'] = [12, 14, 12, 38, 18, 13, 13, 13, 15, 13].map((w) => ({ wch: w }));
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Viajes');
   XLSX.writeFile(wb, `viajes_${fViajes.desde}_${fViajes.hasta}.xlsx`);
+}
+
+function subirCsvLactalis() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.csv,text/csv'; inp.multiple = true;
+  inp.onchange = async () => {
+    const files = [...inp.files]; if (!files.length) return;
+    let lin = 0, nue = 0, enl = 0, act = 0;
+    try {
+      for (const f of files) {
+        aviso('Subiendo ' + f.name + '…');
+        const r = await q(db().rpc('importar_csv_lactalis', { p_texto: await f.text(), p_archivo: f.name }));
+        const x = (r && r[0]) || {};
+        lin += x.lineas || 0; nue += x.viajes_nuevos || 0; enl += x.viajes_enlazados || 0; act += x.viajes_actualizados || 0;
+      }
+      aviso(`${files.length} CSV: ${lin} albaranes · ${enl} viajes completados · ${nue} nuevos (no estaban en TransControl) · ${act} actualizados`);
+      pViajes();
+    } catch (e) { console.error(e); }
+  };
+  inp.click();
 }
 
 function importarViajes() {
