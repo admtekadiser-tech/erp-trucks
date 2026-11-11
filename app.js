@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v1.1
+/* ERP TRUCKS CROS TRANSPORT · v1.3
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -202,7 +202,10 @@ async function pViajes() {
   else if (fViajes.cliente) qy = qy.eq('cliente_id', fViajes.cliente);
   if (fViajes.factura === 'sin_facturar') qy = qy.is('factura_id', null).neq('estado', 'anulado');
   else if (fViajes.factura === 'facturados') qy = qy.not('factura_id', 'is', null);
-  const [todos, imps] = await Promise.all([q(qy), q(db().from('importaciones').select('*').order('fecha', { ascending: false }).limit(1))]);
+  const [todos, imps, exl] = await Promise.all([q(qy), q(db().from('importaciones').select('*').order('fecha', { ascending: false }).limit(1)),
+    q(db().from('viajes').select('id,extras_lineas').gte('fecha', fViajes.desde).lte('fecha', fViajes.hasta).limit(5000))]);
+  const mExtras = Object.fromEntries(exl.map((x) => [x.id, x.extras_lineas || {}]));
+  todos.forEach((v) => { v.extras_lineas = mExtras[v.id] || {}; });
   let lista = todos;
   if (fViajes.precio === 'sin') lista = lista.filter((v) => v.importe_ruta == null && v.precio_manual == null);
   if (fViajes.buscar) {
@@ -270,11 +273,34 @@ function filaViaje(v) {
     <td><select class="c-cli" ${dis} onchange="guardarCelda(this,'cliente_id')">${opciones(S.clientes, v.cliente_id, '— sin cliente —')}</select></td>
     <td class="lineas">${filas.map((i) => `<div>${esc(clientes[i] || '')}</div>`).join('')}</td>
     <td class="lineas">${filas.map((i) => `<div><input class="c-alb" value="${esc(albs[i] || '')}" ${dis} onchange="guardarCelda(this,'albaranes')"></div>`).join('')}</td>
-    ${CONCEPTOS.map(([k]) => `<td class="num"><input class="c-imp" data-campo="${k}" inputmode="decimal" value="${numCampo(k === 'importe_ruta' ? rutaImp : v[k])}" ${dis} onchange="guardarCelda(this,'${k}')">${k === 'importe_ruta' ? '<br>' + infoTarifa : ''}</td>`).join('')}
+    ${CONCEPTOS.map(([k]) => k === 'importe_ruta'
+      ? `<td class="num"><input class="c-imp" data-campo="${k}" inputmode="decimal" value="${numCampo(rutaImp)}" ${dis} onchange="guardarCelda(this,'${k}')"><br>${infoTarifa}</td>`
+      : `<td class="num lineas">${filas.map((i) => `<div><input class="c-imp" data-campo="${k}" data-clave="${esc(claveLinea(v, i))}" inputmode="decimal" value="${numCampo(((v.extras_lineas || {})[claveLinea(v, i)] || {})[k])}" ${dis} onchange="guardarExtra(this,'${k}')"></div>`).join('')}</td>`).join('')}
     <td class="num c-total"><b>${eur(v.importe)}</b></td>
     <td>${v.factura_codigo ? et('verde', v.factura_codigo) : v.factura_id ? et('azul', 'En borrador') : '<span style="color:var(--gris)">—</span>'}</td>
     <td style="white-space:nowrap"><button class="sec peq" title="Editar el viaje" onclick="editarViaje('${v.id}')">✎</button>${v.factura_id ? '' : ` <button class="sec peq" title="Borrar el viaje" onclick="borrarViaje('${v.id}')">🗑</button>`}</td>
   </tr>`;
+}
+// Manipulación, retornos, paralización y peaje van por parada (línea del viaje)
+const claveLinea = (v, i) => { const a = (v.albaranes || [])[i]; return a ? 'a:' + a : 'n:' + i + ':' + ((v.detalle_clientes || [])[i] || ''); };
+async function guardarExtra(el, campo) {
+  const tr = el.closest('tr'); const id = tr.dataset.id; const clave = el.dataset.clave;
+  const valor = leerNum(el.value);
+  if (Number.isNaN(valor)) { el.classList.add('mal'); return aviso('Importe no válido: escribe solo el número, p. ej. 40 o 40,50', true); }
+  el.classList.remove('mal'); el.value = numCampo(valor);
+  const v = pViajes.lista.find((x) => x.id === id); if (!v) return;
+  const ex = JSON.parse(JSON.stringify(v.extras_lineas || {}));
+  const linea = ex[clave] || {};
+  if (valor == null) delete linea[campo]; else linea[campo] = valor;
+  if (Object.keys(linea).length) ex[clave] = linea; else delete ex[clave];
+  try {
+    await q(db().from('viajes').update({ extras_lineas: ex }).eq('id', id));
+    v.extras_lineas = ex;
+    el.classList.add('ok'); setTimeout(() => el.classList.remove('ok'), 900);
+    const total = [...tr.querySelectorAll('.c-imp')].reduce((a, x) => a + (leerNum(x.value) || 0), 0);
+    v.importe = total; tr.querySelector('.c-total').innerHTML = `<b>${eur(total)}</b>`;
+    recalcularTotalesViajes();
+  } catch { el.classList.add('mal'); }
 }
 async function guardarCelda(el, campo) {
   const tr = el.closest('tr'); const id = tr.dataset.id;
@@ -357,9 +383,9 @@ async function exportarViajesExcel() {
     const cli = v.detalle_clientes || []; const alb = v.albaranes || [];
     const n = Math.max(cli.length, alb.length, 1);
     for (let i = 0; i < n; i++) {
-      const f = { RUTA: (v.ruta_nombre || '').replace(/^RUTA\s+/i, ''), 'Nº EXPEDICION': v.num_expedicion || '', 'FECHA CARGA': fecha(v.fecha), 'DETALLE CLIENTES': cli[i] || '', 'DETALLE ALBARANES': alb[i] || '' };
+      const f = { RUTA: i === 0 ? (v.ruta_nombre || '').replace(/^RUTA\s+/i, '') : '', 'Nº EXPEDICION': i === 0 ? (v.num_expedicion || '') : '', 'FECHA CARGA': fecha(v.fecha), 'DETALLE CLIENTES': cli[i] || '', 'DETALLE ALBARANES': alb[i] || '' };
       // los importes van solo en la primera fila de cada viaje para que la suma no se duplique
-      CONCEPTOS.forEach(([k, , col]) => { const x = k === 'importe_ruta' ? (v.importe_ruta ?? v.precio_manual) : v[k]; f[col] = i === 0 && x != null ? Number(x) : ''; });
+      CONCEPTOS.forEach(([k, , col]) => { const x = k === 'importe_ruta' ? (i === 0 ? (v.importe_ruta ?? v.precio_manual) : null) : (((v.extras_lineas || {})[claveLinea(v, i)] || {})[k] ?? (i === 0 && !Object.keys(v.extras_lineas || {}).length ? v[k] : null)); f[col] = x != null ? Number(x) : ''; });
       filas.push(f);
     }
   }
@@ -432,7 +458,7 @@ async function editarViaje(id) {
     <div><label>Detalle albaranes (uno por línea, en el mismo orden)</label><textarea id="v-albaranes" rows="4" ${dis}>${esc((v.albaranes || []).join('\n'))}</textarea></div>
   </div>
   <div class="rejilla">
-    ${CONCEPTOS.map(([k, t]) => `<div><label>${t} €</label><input id="v-${k}" inputmode="decimal" value="${numCampo(imp(k))}" ${dis} oninput="${k === 'importe_ruta' ? "$('#v-auto').checked=false;" : ''}totalFichaViaje()"></div>`).join('')}
+    ${CONCEPTOS.map(([k, t]) => `<div><label>${t} €</label><input id="v-${k}" inputmode="decimal" value="${numCampo(imp(k))}" ${k === 'importe_ruta' ? dis : 'disabled title="Se pone por parada en la tabla de Viajes"'} oninput="${k === 'importe_ruta' ? "$('#v-auto').checked=false;" : ''}totalFichaViaje()"></div>`).join('')}
   </div>
   <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="v-auto" style="width:auto" ${v.precio_auto ? 'checked' : ''} ${dis}>
     Importe de ruta según tarifa ${v.tarifa_nombre ? '(' + esc(v.tarifa_nombre) + ')' : ''} — al guardar se recalcula con las paradas y el cliente</label>
@@ -466,7 +492,7 @@ async function guardarViaje(id) {
     tractora_id: val('v-tractora'), km: val('v-km'), notas: val('v-notas'), precio_auto: val('v-auto')
   };
   if (!reg.fecha) return aviso('La fecha es obligatoria', true);
-  for (const [k, t] of CONCEPTOS) {
+  for (const [k, t] of CONCEPTOS.filter(([c]) => c === 'importe_ruta')) {
     const n = leerNum($('#v-' + k).value);
     if (Number.isNaN(n)) return aviso(`${t}: importe no válido`, true);
     reg[k] = n;
