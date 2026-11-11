@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v1.3
+/* ERP TRUCKS CROS TRANSPORT · v1.4
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -275,13 +275,17 @@ function filaViaje(v) {
     <td class="lineas">${filas.map((i) => `<div><input class="c-alb" value="${esc(albs[i] || '')}" ${dis} onchange="guardarCelda(this,'albaranes')"></div>`).join('')}</td>
     ${CONCEPTOS.map(([k]) => k === 'importe_ruta'
       ? `<td class="num"><input class="c-imp" data-campo="${k}" inputmode="decimal" value="${numCampo(rutaImp)}" ${dis} onchange="guardarCelda(this,'${k}')"><br>${infoTarifa}</td>`
-      : `<td class="num lineas">${filas.map((i) => `<div><input class="c-imp" data-campo="${k}" data-clave="${esc(claveLinea(v, i))}" inputmode="decimal" value="${numCampo(((v.extras_lineas || {})[claveLinea(v, i)] || {})[k])}" ${dis} onchange="guardarExtra(this,'${k}')"></div>`).join('')}</td>`).join('')}
+      : `<td class="num lineas">${filas.map((i) => (primeraDeParada(v, i) || ((v.extras_lineas || {})[claveLinea(v, i)] || {})[k] != null)
+          ? `<div><input class="c-imp" data-campo="${k}" data-clave="${esc(claveLinea(v, i))}" inputmode="decimal" value="${numCampo(((v.extras_lineas || {})[claveLinea(v, i)] || {})[k])}" ${dis} onchange="guardarExtra(this,'${k}')"></div>`
+          : '<div><input disabled tabindex="-1" style="visibility:hidden"></div>').join('')}</td>`).join('')}
     <td class="num c-total"><b>${eur(v.importe)}</b></td>
     <td>${v.factura_codigo ? et('verde', v.factura_codigo) : v.factura_id ? et('azul', 'En borrador') : '<span style="color:var(--gris)">—</span>'}</td>
     <td style="white-space:nowrap"><button class="sec peq" title="Editar el viaje" onclick="editarViaje('${v.id}')">✎</button>${v.factura_id ? '' : ` <button class="sec peq" title="Borrar el viaje" onclick="borrarViaje('${v.id}')">🗑</button>`}</td>
   </tr>`;
 }
 // Manipulación, retornos, paralización y peaje van por parada (línea del viaje)
+// Los extras se ponen en la primera línea de cada parada (cuando cambia el cliente)
+const primeraDeParada = (v, i) => i === 0 || ((v.detalle_clientes || [])[i] || '') !== ((v.detalle_clientes || [])[i - 1] || '');
 const claveLinea = (v, i) => { const a = (v.albaranes || [])[i]; return a ? 'a:' + a : 'n:' + i + ':' + ((v.detalle_clientes || [])[i] || ''); };
 async function guardarExtra(el, campo) {
   const tr = el.closest('tr'); const id = tr.dataset.id; const clave = el.dataset.clave;
