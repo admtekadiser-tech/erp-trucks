@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v1.4
+/* ERP TRUCKS CROS TRANSPORT · v1.5
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -203,9 +203,10 @@ async function pViajes() {
   if (fViajes.factura === 'sin_facturar') qy = qy.is('factura_id', null).neq('estado', 'anulado');
   else if (fViajes.factura === 'facturados') qy = qy.not('factura_id', 'is', null);
   const [todos, imps, exl] = await Promise.all([q(qy), q(db().from('importaciones').select('*').order('fecha', { ascending: false }).limit(1)),
-    q(db().from('viajes').select('id,extras_lineas').gte('fecha', fViajes.desde).lte('fecha', fViajes.hasta).limit(5000))]);
+    q(db().from('viajes').select('id,extras_lineas,paradas_lineas').gte('fecha', fViajes.desde).lte('fecha', fViajes.hasta).limit(5000))]);
   const mExtras = Object.fromEntries(exl.map((x) => [x.id, x.extras_lineas || {}]));
-  todos.forEach((v) => { v.extras_lineas = mExtras[v.id] || {}; });
+  const mParadas = Object.fromEntries(exl.map((x) => [x.id, x.paradas_lineas || null]));
+  todos.forEach((v) => { v.extras_lineas = mExtras[v.id] || {}; v.paradas_lineas = mParadas[v.id] || null; });
   let lista = todos;
   if (fViajes.precio === 'sin') lista = lista.filter((v) => v.importe_ruta == null && v.precio_manual == null);
   if (fViajes.buscar) {
@@ -285,7 +286,12 @@ function filaViaje(v) {
 }
 // Manipulación, retornos, paralización y peaje van por parada (línea del viaje)
 // Los extras se ponen en la primera línea de cada parada (cuando cambia el cliente)
-const primeraDeParada = (v, i) => i === 0 || ((v.detalle_clientes || [])[i] || '') !== ((v.detalle_clientes || [])[i - 1] || '');
+// Parada = mismo sitio de descarga (lo calcula la importación del CSV: mismo código de dirección o misma calle)
+const primeraDeParada = (v, i) => {
+  const p = v.paradas_lineas;
+  if (p && p.length) return i === 0 || (p[i] || '') !== (p[i - 1] || '');
+  return i === 0 || ((v.detalle_clientes || [])[i] || '') !== ((v.detalle_clientes || [])[i - 1] || '');
+};
 const claveLinea = (v, i) => { const a = (v.albaranes || [])[i]; return a ? 'a:' + a : 'n:' + i + ':' + ((v.detalle_clientes || [])[i] || ''); };
 async function guardarExtra(el, campo) {
   const tr = el.closest('tr'); const id = tr.dataset.id; const clave = el.dataset.clave;
