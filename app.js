@@ -1,4 +1,4 @@
-/* ERP TRUCKS CROS TRANSPORT · v1.5
+/* ERP TRUCKS CROS TRANSPORT · v1.6
    App web para administración: viajes (desde TransControl, con importes por concepto),
    clientes, prefacturas, facturas, cobros y alertas. Datos en Supabase (esquema erp). */
 'use strict';
@@ -116,7 +116,7 @@ function pantallaCambioPass(obligatorio) {
 /* ---------------------------------------------------------------- estructura */
 const MENU = [
   ['inicio', 'Inicio'], ['viajes', 'Viajes'], ['facturas', 'Facturas'],
-  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Personal'], ['gastos', 'Gastos'],
+  ['clientes', 'Clientes'], ['flota', 'Flota'], ['conductores', 'Personal'], ['incidencias', 'Incidencias'], ['litigios', 'Litigios'], ['gastos', 'Gastos'],
   ['gestoria', 'Gestoría'], ['empresa', 'Empresa']
 ];
 
@@ -141,7 +141,7 @@ async function pintar() {
     <main class="contenido" id="pagina"><div class="cargando">Cargando…</div></main>
   </div>`;
   const PAG = { inicio: pInicio, viajes: pViajes, facturas: pFacturas, factura: pFactura, clientes: pClientes, empresa: pEmpresa,
-    flota: pFlota, conductores: pConductores, gastos: pGastos, gestoria: pGestoria };
+    flota: pFlota, conductores: pConductores, gastos: pGastos, gestoria: pGestoria, incidencias: pIncidencias, litigios: pLitigios };
   try { await (PAG[pag] || pProximamente)(id, pag); }
   catch (e) { console.error(e); $('#pagina').innerHTML = `<div class="tarjeta error">Error al cargar: ${esc(traducirError(e))}</div>`; }
 }
@@ -166,6 +166,12 @@ async function pInicio() {
     q(db().from('facturas').select('base').eq('estado', 'emitida').gte('fecha', inicioMes())),
     q(db().from('viajes').select('id').is('cliente_id', null).neq('estado', 'anulado'))
   ]);
+  const [incAb, litAb] = await Promise.all([
+    q(db().from('incidencias').select('id,origen,estado').neq('estado', 'cerrada')),
+    q(db().from('litigios').select('id,fecha_limite,estado,importe_reclamado').not('estado', 'in', '(cerrado_recuperado,cerrado_sin_recuperar,anulado)'))
+  ]);
+  const incTC = incAb.filter((x) => x.origen === 'transcontrol' && x.estado === 'abierta').length;
+  const litVenc = litAb.filter((x) => x.fecha_limite && x.fecha_limite <= new Date(Date.now() + 7 * 86400000).toLocaleDateString('sv-SE'));
   const suma = (l, k) => l.reduce((a, x) => a + Number(x[k] || 0), 0);
   const vencido = cobro.filter((x) => x.estado_cobro === 'vencida');
   $('#pagina').innerHTML = `
@@ -177,6 +183,12 @@ async function pInicio() {
     <div class="kpi"><div class="t">Pendiente de cobro</div><div class="n">${eur(suma(cobro, 'pendiente'))}</div><div class="t">${cobro.length} facturas</div></div>
     <div class="kpi"><div class="t">Vencido sin cobrar</div><div class="n" style="color:${vencido.length ? 'var(--rojo)' : 'inherit'}">${eur(suma(vencido, 'pendiente'))}</div><div class="t">${vencido.length} facturas</div></div>
     <div class="kpi"><div class="t">Facturado este mes (base)</div><div class="n">${eur(suma(mes, 'base'))}</div><div class="t">${mes.length} facturas</div></div>
+  </div>
+  ${incTC ? `<div class="alerta ambar">Hay ${incTC} incidencias nuevas de los conductores (TransControl) por revisar. <a href="#incidencias" style="margin-left:auto">Ver</a></div>` : ''}
+  ${litVenc.length ? `<div class="alerta rojo">${litVenc.length} litigio${litVenc.length > 1 ? 's' : ''} con la fecha límite vencida o en los próximos 7 días. <a href="#litigios" style="margin-left:auto">Ver</a></div>` : ''}
+  <div class="kpis">
+    <div class="kpi"><div class="t">Incidencias sin cerrar</div><div class="n">${incAb.length}</div><div class="t"><a href="#incidencias">Ver incidencias</a></div></div>
+    <div class="kpi"><div class="t">Litigios en marcha</div><div class="n">${litAb.length}</div><div class="t">reclaman ${eur(suma(litAb, 'importe_reclamado'))}</div></div>
   </div>
   <h2>Avisos</h2>
   ${alertas.length ? alertas.map((a) => `<div class="alerta ${a.nivel}">${et(a.nivel, { flota: 'Flota', conductores: 'Personal', cobros: 'Cobro', facturacion: 'Facturación' }[a.grupo])} ${esc(a.texto)}<span class="f">${fecha(a.fecha)}</span></div>`).join('')
@@ -1622,6 +1634,294 @@ async function guardarGasto(id) {
   } catch { const b = $('#b-gasto'); if (b) b.disabled = false; }
 }
 async function borrarGasto(id) { if (!confirm('¿Borrar este gasto?')) return; await q(db().from('gastos').delete().eq('id', id)); cerrarModal(); pGastos(); }
+
+/* ---------------------------------------------------------------- INCIDENCIAS
+   Averías, faltas, retrasos, rutas que no salen… Las que el conductor pone en TransControl entran solas
+   (cada hora) con la etiqueta «TransControl» para revisarlas. */
+const TIPOS_INC = { averia: 'Avería', accidente: 'Accidente', no_se_presenta: 'Falta del conductor', retraso: 'Retraso', ruta_no_realizada: 'Ruta que no sale',
+  temperatura: 'Temperatura', multa: 'Multa', queja_cliente: 'Queja del cliente', otro: 'Otro' };
+const RESP_INC = { por_determinar: 'Por determinar', conductor: 'Conductor', empresa: 'Empresa', tercero: 'Tercero', cliente: 'Cliente', ninguna: 'Nadie' };
+const EST_INC = { abierta: ['ambar', 'Abierta'], en_curso: ['azul', 'En curso'], cerrada: ['verde', 'Cerrada'] };
+const fInc = { estado: 'pendientes', tipo: '', conductor: '', desde: '', hasta: '' };
+const textoCorto = (t, n = 90) => { const s = (t || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const esCamion = (v) => !['semirremolque', 'remolque'].includes(v.tipo);
+async function rutasLista() {
+  if (!S.rutasLista) S.rutasLista = await q(db().from('rutas').select('id,nombre,cliente_id').eq('ignorar', false).is('agrupar_en', null).order('nombre'));
+  return S.rutasLista;
+}
+async function subirArchivos(inputId, carpeta) {
+  const inp = document.getElementById(inputId); const files = [...(inp?.files || [])]; const rutas = [];
+  for (const file of files) {
+    if (file.size > 10 * 1024 * 1024) { aviso(`«${file.name}» pesa más de 10 MB`, true); throw new Error('grande'); }
+    const limpio = file.name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.\-]+/g, '_').slice(-80);
+    const ruta = `${carpeta}/${Date.now()}_${limpio}`;
+    await q(sb.storage.from(BUCKET).upload(ruta, file, { contentType: file.type || undefined }));
+    rutas.push(ruta);
+  }
+  return rutas;
+}
+const listaArchivos = (arr, quitar) => (arr || []).length
+  ? `<div class="ayuda">${arr.map((r, i) => `${enlaceArchivo(r)} <span>${esc(r.split('/').pop().replace(/^\d+_/, ''))}</span>${quitar ? ` <a href="javascript:void 0" onclick="${quitar}(${i})">✕</a>` : ''}`).join('<br>')}</div>` : '';
+async function verFotoTC(id) {
+  const w = window.open('', '_blank');
+  const url = await q(db().rpc('foto_incidencia_tc', { p_id: id }));
+  if (!url) { w.close(); return aviso('Esta incidencia no tiene foto en TransControl', true); }
+  w.document.write(`<title>Foto de TransControl</title><img src="${url}" style="max-width:100%">`);
+}
+
+async function pIncidencias() {
+  let qy = db().from('v_incidencias').select('*').order('fecha', { ascending: false }).order('creado_en', { ascending: false }).limit(1000);
+  if (fInc.estado === 'pendientes') qy = qy.neq('estado', 'cerrada'); else if (fInc.estado) qy = qy.eq('estado', fInc.estado);
+  if (fInc.tipo) qy = qy.eq('tipo', fInc.tipo);
+  if (fInc.conductor) qy = qy.eq('conductor_id', fInc.conductor);
+  if (fInc.desde) qy = qy.gte('fecha', fInc.desde);
+  if (fInc.hasta) qy = qy.lte('fecha', fInc.hasta);
+  const [lista, abiertas] = await Promise.all([q(qy), q(db().from('incidencias').select('id,origen,estado,coste,fecha').neq('estado', 'cerrada'))]);
+  const tc = abiertas.filter((x) => x.origen === 'transcontrol' && x.estado === 'abierta').length;
+  const coste = lista.reduce((a, x) => a + Number(x.coste || 0), 0);
+  $('#pagina').innerHTML = `
+  <h1>Incidencias</h1>
+  <div class="barra">
+    <div class="campo"><label>Estado</label><select id="fi-estado">${[['pendientes', 'Sin cerrar'], ['abierta', 'Abiertas'], ['en_curso', 'En curso'], ['cerrada', 'Cerradas'], ['', 'Todas']]
+      .map(([k, t]) => `<option value="${k}" ${fInc.estado === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Tipo</label><select id="fi-tipo"><option value="">Todos</option>${Object.entries(TIPOS_INC).map(([k, t]) => `<option value="${k}" ${fInc.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Conductor</label><select id="fi-conductor">${opciones(S.conductores, fInc.conductor, 'Todos')}</select></div>
+    <div class="campo"><label>Desde</label><input type="date" id="fi-desde" value="${fInc.desde}"></div>
+    <div class="campo"><label>Hasta</label><input type="date" id="fi-hasta" value="${fInc.hasta}"></div>
+    <button onclick="editarIncidencia()">+ Nueva incidencia</button>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="t">Sin cerrar</div><div class="n">${abiertas.length}</div><div class="t">abiertas o en curso</div></div>
+    <div class="kpi"><div class="t">De TransControl por revisar</div><div class="n" style="color:${tc ? 'var(--ambar)' : 'inherit'}">${tc}</div><div class="t">las mandan los conductores</div></div>
+    <div class="kpi"><div class="t">En esta lista</div><div class="n">${lista.length}</div><div class="t">coste ${eur(coste)}</div></div>
+  </div>
+  <div class="tabla-wrap"><table>
+    <tr><th>Fecha</th><th>Tipo</th><th>Conductor</th><th>Camión</th><th>Ruta / cliente</th><th>Qué pasó</th><th>Culpa</th><th class="num">Coste</th><th>Estado</th></tr>
+    ${lista.map((x) => `<tr class="clic" onclick="editarIncidencia('${x.id}')">
+      <td>${fecha(x.fecha)}${x.hora ? '<br><span class="ayuda">' + x.hora.slice(0, 5) + '</span>' : ''}</td>
+      <td>${TIPOS_INC[x.tipo] || esc(x.tipo)}${x.origen === 'transcontrol' ? '<br>' + et('azul', 'TransControl') : ''}</td>
+      <td>${esc(x.conductor_nombre)}</td><td>${esc(x.matricula)}${x.remolque_matricula ? '<br>' + esc(x.remolque_matricula) : ''}</td>
+      <td>${esc(x.ruta_nombre)}${x.cliente_nombre ? '<br><span class="ayuda">' + esc(x.cliente_nombre) + '</span>' : ''}</td>
+      <td>${esc(textoCorto(x.descripcion))}${x.num_litigios ? '<br>' + et('rojo', x.num_litigios + ' litigio' + (x.num_litigios > 1 ? 's' : '')) : ''}${(x.archivos || []).length || x.tc_tiene_foto ? ' 📎' : ''}</td>
+      <td>${RESP_INC[x.responsabilidad] || ''}</td><td class="num">${x.coste != null ? eur(x.coste) : ''}</td>
+      <td>${et(...(EST_INC[x.estado] || ['gris', x.estado]))}</td></tr>`).join('')}
+  </table>${lista.length ? '' : '<div class="vacio">No hay incidencias con estos filtros.</div>'}</div>`;
+  ['estado', 'tipo', 'conductor', 'desde', 'hasta'].forEach((k) => { $('#fi-' + k).onchange = (e) => { fInc[k] = e.target.value; pIncidencias(); }; });
+}
+
+async function editarIncidencia(id) {
+  const [x, rutas] = await Promise.all([
+    id ? q(db().from('v_incidencias').select('*').eq('id', id).single()) : Promise.resolve({ fecha: hoy(), tipo: 'averia', estado: 'abierta', responsabilidad: 'por_determinar', origen: 'erp', archivos: [] }),
+    rutasLista()]);
+  editarIncidencia.archivos = [...(x.archivos || [])];
+  const lits = id ? await q(db().from('litigios').select('id,referencia_cliente,estado').eq('incidencia_id', id)) : [];
+  const camiones = S.vehiculos.filter(esCamion); const remolques = S.vehiculos.filter((v) => !esCamion(v));
+  modal(`<h1>${id ? 'Incidencia' : 'Nueva incidencia'} ${x.origen === 'transcontrol' ? et('azul', 'Enviada por el conductor desde TransControl') : ''}</h1>
+  <div class="rejilla">
+    <div><label>Fecha</label><input type="date" id="i-fecha" value="${x.fecha || ''}"></div>
+    <div><label>Hora</label><input type="time" id="i-hora" value="${(x.hora || '').slice(0, 5)}"></div>
+    <div><label>Tipo</label><select id="i-tipo">${Object.entries(TIPOS_INC).map(([k, t]) => `<option value="${k}" ${x.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Estado</label><select id="i-estado">${Object.entries(EST_INC).map(([k, [, t]]) => `<option value="${k}" ${x.estado === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Conductor</label><select id="i-conductor">${opciones(S.conductores, x.conductor_id, '—')}</select></div>
+    <div><label>Camión</label><select id="i-vehiculo">${opciones(camiones, x.vehiculo_id, '—', (v) => v.matricula)}</select></div>
+    <div><label>Remolque</label><select id="i-remolque">${opciones(remolques, x.remolque_id, '—', (v) => v.matricula)}</select></div>
+    <div><label>Ruta</label><select id="i-ruta" onchange="rutaIncidenciaElegida()">${opciones(rutas, x.ruta_id, '—')}</select></div>
+    <div><label>Cliente</label><select id="i-cliente">${opciones(S.clientes, x.cliente_id, '—')}</select></div>
+    <div><label>¿Avisó antes?</label><select id="i-aviso"><option value="">—</option><option value="si" ${x.aviso_previo === true ? 'selected' : ''}>Sí</option><option value="no" ${x.aviso_previo === false ? 'selected' : ''}>No</option></select></div>
+    <div><label>Minutos de retraso</label><input type="number" min="0" id="i-retraso" value="${x.minutos_retraso ?? ''}"></div>
+    <div><label>¿De quién es la culpa?</label><select id="i-resp">${Object.entries(RESP_INC).map(([k, t]) => `<option value="${k}" ${x.responsabilidad === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Coste €</label><input type="number" step="0.01" id="i-coste" value="${x.coste ?? ''}"></div>
+    <div><label>Camión parado desde</label><input type="date" id="i-pdesde" value="${x.vehiculo_parado_desde || ''}"></div>
+    <div><label>Parado hasta</label><input type="date" id="i-phasta" value="${x.vehiculo_parado_hasta || ''}"></div>
+  </div>
+  <label>Qué pasó</label><textarea id="i-desc" rows="4">${esc(x.descripcion)}</textarea>
+  <label>Solución / qué se ha hecho</label><textarea id="i-sol" rows="3">${esc(x.solucion)}</textarea>
+  <label>Fotos y documentos</label>
+  <div id="i-lista-arch">${listaArchivos(editarIncidencia.archivos, 'quitarArchivoInc')}</div>
+  ${x.tc_tiene_foto ? `<div class="ayuda"><a href="javascript:void 0" onclick="verFotoTC('${x.tc_incidencia_id}')">📷 Ver la foto que mandó el conductor</a></div>` : ''}
+  <input type="file" id="i-archivos" multiple accept="application/pdf,image/*">
+  ${lits.length ? `<p class="ayuda">Litigios de esta incidencia: ${lits.map((l) => `<a href="#litigios" onclick="cerrarModal();setTimeout(()=>editarLitigio('${l.id}'),300)">${esc(l.referencia_cliente || 'sin referencia')}</a> (${FASES_LIT[l.estado]?.[1] || l.estado})`).join(' · ')}</p>` : ''}
+  <div class="acciones">
+    ${id && x.origen !== 'transcontrol' ? `<button class="peligro izq" onclick="borrarIncidencia('${id}')">Borrar</button>` : ''}
+    ${id ? `<button class="sec" onclick="litigioDesdeIncidencia('${id}')">Abrir litigio</button>` : ''}
+    <button class="sec" onclick="cerrarModal()">Cancelar</button><button id="b-inc" onclick="guardarIncidencia(${id ? `'${id}'` : ''})">Guardar</button></div>`);
+}
+function rutaIncidenciaElegida() {
+  const r = (S.rutasLista || []).find((x) => x.id === val('i-ruta'));
+  if (r && r.cliente_id && !val('i-cliente')) $('#i-cliente').value = r.cliente_id;
+}
+function quitarArchivoInc(i) { editarIncidencia.archivos.splice(i, 1); $('#i-lista-arch').innerHTML = listaArchivos(editarIncidencia.archivos, 'quitarArchivoInc'); }
+async function guardarIncidencia(id) {
+  if (!val('i-fecha')) return aviso('La fecha es obligatoria', true);
+  if (val('i-pdesde') && val('i-phasta') && val('i-phasta') < val('i-pdesde')) return aviso('«Parado hasta» no puede ser antes de «parado desde»', true);
+  $('#b-inc').disabled = true;
+  try {
+    const nuevos = await subirArchivos('i-archivos', 'incidencias/' + val('i-fecha').slice(0, 7));
+    const reg = { fecha: val('i-fecha'), hora: val('i-hora'), tipo: val('i-tipo'), estado: val('i-estado'), conductor_id: val('i-conductor'), vehiculo_id: val('i-vehiculo'),
+      remolque_id: val('i-remolque'), ruta_id: val('i-ruta'), cliente_id: val('i-cliente'),
+      aviso_previo: val('i-aviso') == null ? null : val('i-aviso') === 'si', minutos_retraso: val('i-retraso'), responsabilidad: val('i-resp'),
+      coste: val('i-coste') == null ? null : leerNum(val('i-coste')), vehiculo_parado_desde: val('i-pdesde'), vehiculo_parado_hasta: val('i-phasta'),
+      descripcion: val('i-desc'), solucion: val('i-sol'), archivos: [...editarIncidencia.archivos, ...nuevos] };
+    if (id) await q(db().from('incidencias').update(reg).eq('id', id)); else await q(db().from('incidencias').insert(reg));
+    cerrarModal(); aviso('Incidencia guardada'); if ((location.hash.slice(1) || '').startsWith('incidencias')) pIncidencias(); else location.hash = '#incidencias';
+  } catch { const b = $('#b-inc'); if (b) b.disabled = false; }
+}
+async function borrarIncidencia(id) {
+  if (!confirm('¿Borrar esta incidencia? Si tiene litigios, quedarán sin incidencia enlazada.')) return;
+  await q(db().from('incidencias').delete().eq('id', id)); cerrarModal(); aviso('Incidencia borrada'); pIncidencias();
+}
+async function litigioDesdeIncidencia(id) {
+  const x = await q(db().from('incidencias').select('*').eq('id', id).single());
+  cerrarModal();
+  editarLitigio(null, { incidencia_id: id, fecha_servicio: x.fecha, cliente_id: x.cliente_id, ruta_id: x.ruta_id, conductor_id: x.conductor_id,
+    vehiculo_id: x.vehiculo_id, remolque_id: x.remolque_id, viaje_id: x.viaje_id, descripcion: x.descripcion, responsabilidad: x.responsabilidad,
+    motivo: x.tipo === 'temperatura' ? 'temperatura' : x.tipo === 'retraso' ? 'retraso' : 'otro' });
+}
+
+/* ---------------------------------------------------------------- LITIGIOS
+   Reclamaciones del cliente (sobre todo Lactalis) por la mercancía: se abren, nos lo cobran y se reclama al seguro. */
+const FASES_LIT = {
+  abierto: ['ambar', 'Abierto (nos reclaman)'], documentando: ['ambar', 'Recopilando pruebas'], alegado: ['azul', 'Alegado al cliente'],
+  cargado: ['rojo', 'Nos lo han cobrado'], reclamado_seguro: ['azul', 'Reclamado al seguro'], seguro_aceptado: ['azul', 'Seguro acepta (falta cobrar)'],
+  cerrado_recuperado: ['verde', 'Cerrado · recuperado'], cerrado_sin_recuperar: ['gris', 'Cerrado · sin recuperar'], anulado: ['gris', 'Anulado (no nos cobran)']
+};
+const LIT_CERRADO = ['cerrado_recuperado', 'cerrado_sin_recuperar', 'anulado'];
+const MOTIVOS_LIT = { temperatura: 'Temperatura', mercancia_danada: 'Mercancía dañada', faltante: 'Faltan bultos', retraso: 'Retraso', entrega_erronea: 'Entrega errónea', documentacion: 'Documentación', otro: 'Otro' };
+const FORMA_CARGO = { descuento_pago: 'Descuento en el pago', factura_cargo: 'Factura de cargo', abono: 'Abono / rectificativa', otro: 'Otro' };
+const fLit = { ver: 'activos', cliente: '', buscar: '' };
+async function pLitigios() {
+  let qy = db().from('v_litigios').select('*').order('fecha_apertura', { ascending: false }).limit(1000);
+  if (fLit.ver === 'activos') qy = qy.not('estado', 'in', `(${LIT_CERRADO.join(',')})`);
+  else if (fLit.ver === 'cerrados') qy = qy.in('estado', LIT_CERRADO);
+  if (fLit.cliente) qy = qy.eq('cliente_id', fLit.cliente);
+  let lista = await q(qy);
+  const b = (fLit.buscar || '').toLowerCase();
+  if (b) lista = lista.filter((x) => [x.referencia_cliente, x.albaran, x.num_siniestro, x.ruta_nombre, x.descripcion].some((s) => (s || '').toLowerCase().includes(b)));
+  const suma = (k) => lista.reduce((a, x) => a + Number(x[k] || 0), 0);
+  const hoyS = hoy(); const en7 = new Date(Date.now() + 7 * 86400000).toLocaleDateString('sv-SE');
+  const plazo = (x) => !x.fecha_limite || LIT_CERRADO.includes(x.estado) ? (x.fecha_limite ? fecha(x.fecha_limite) : '')
+    : x.fecha_limite < hoyS ? et('rojo', 'Vencido ' + fecha(x.fecha_limite)) : x.fecha_limite <= en7 ? et('ambar', fecha(x.fecha_limite)) : fecha(x.fecha_limite);
+  $('#pagina').innerHTML = `
+  <h1>Litigios</h1>
+  <div class="barra">
+    <div class="campo"><label>Ver</label><select id="fl-ver">${[['activos', 'En marcha'], ['cerrados', 'Cerrados'], ['', 'Todos']].map(([k, t]) => `<option value="${k}" ${fLit.ver === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="campo"><label>Cliente</label><select id="fl-cliente">${opciones(S.clientes, fLit.cliente, 'Todos')}</select></div>
+    <div class="campo"><label>Buscar</label><input id="fl-buscar" value="${esc(fLit.buscar)}" placeholder="Referencia, albarán, siniestro…"></div>
+    <button onclick="editarLitigio()">+ Nuevo litigio</button>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="t">Litigios en la lista</div><div class="n">${lista.length}</div><div class="t">${lista.filter((x) => x.fecha_limite && x.fecha_limite < hoyS && !LIT_CERRADO.includes(x.estado)).length} con plazo vencido</div></div>
+    <div class="kpi"><div class="t">Nos reclaman</div><div class="n">${eur(suma('importe_reclamado'))}</div><div class="t">cobrado ya: ${eur(suma('importe_cargado'))}</div></div>
+    <div class="kpi"><div class="t">Recuperado del seguro</div><div class="n" style="color:var(--verde)">${eur(suma('importe_recuperado'))}</div></div>
+    <div class="kpi"><div class="t">Pérdida</div><div class="n" style="color:${suma('perdida') > 0 ? 'var(--rojo)' : 'inherit'}">${eur(suma('perdida'))}</div><div class="t">cobrado − recuperado</div></div>
+  </div>
+  <div class="tabla-wrap"><table>
+    <tr><th>Apertura</th><th>Referencia</th><th>Cliente</th><th>Servicio / albarán</th><th>Ruta · conductor</th><th>Motivo</th><th>Fase</th><th>Plazo</th><th class="num">Reclamado</th><th class="num">Cobrado</th><th class="num">Recuperado</th><th class="num">Pérdida</th></tr>
+    ${lista.map((x) => `<tr class="clic" onclick="editarLitigio('${x.id}')">
+      <td>${fecha(x.fecha_apertura)}</td><td><b>${esc(x.referencia_cliente)}</b>${x.num_siniestro ? '<br><span class="ayuda">Siniestro ' + esc(x.num_siniestro) + '</span>' : ''}</td>
+      <td>${esc(x.cliente_nombre)}</td><td>${fecha(x.fecha_servicio)}${x.albaran ? '<br><span class="ayuda">' + esc(x.albaran) + '</span>' : ''}</td>
+      <td>${esc(x.ruta_nombre)}${x.conductor_nombre ? '<br><span class="ayuda">' + esc(x.conductor_nombre) + '</span>' : ''}</td>
+      <td>${MOTIVOS_LIT[x.motivo] || ''}</td><td>${et(...(FASES_LIT[x.estado] || ['gris', x.estado]))}${x.proxima_accion ? '<br><span class="ayuda">' + esc(textoCorto(x.proxima_accion, 50)) + '</span>' : ''}</td>
+      <td>${plazo(x)}</td><td class="num">${x.importe_reclamado != null ? eur(x.importe_reclamado) : ''}</td><td class="num">${x.importe_cargado != null ? eur(x.importe_cargado) : ''}</td>
+      <td class="num">${x.importe_recuperado != null ? eur(x.importe_recuperado) : ''}</td><td class="num"><b>${Number(x.perdida) ? eur(x.perdida) : ''}</b></td></tr>`).join('')}
+  </table>${lista.length ? '' : '<div class="vacio">No hay litigios con estos filtros.</div>'}</div>`;
+  ['ver', 'cliente'].forEach((k) => { $('#fl-' + k).onchange = (e) => { fLit[k] = e.target.value; pLitigios(); }; });
+  $('#fl-buscar').onchange = (e) => { fLit.buscar = e.target.value; pLitigios(); };
+}
+
+async function editarLitigio(id, base) {
+  const [x, rutas, hist] = await Promise.all([
+    id ? q(db().from('litigios').select('*').eq('id', id).single())
+      : Promise.resolve({ fecha_apertura: hoy(), estado: 'abierto', responsabilidad: 'por_determinar', motivo: 'temperatura', archivos: [],
+          cliente_id: (S.clientes.find((c) => /^LACTALIS/i.test(c.nombre)) || {}).id, ...(base || {}) }),
+    rutasLista(),
+    id ? q(db().from('litigio_historial').select('*').eq('litigio_id', id).order('fecha', { ascending: false })) : Promise.resolve([])]);
+  editarLitigio.archivos = [...(x.archivos || [])]; editarLitigio.base = base || {};
+  const camiones = S.vehiculos.filter(esCamion); const remolques = S.vehiculos.filter((v) => !esCamion(v));
+  const n = (k) => (x[k] ?? '');
+  modal(`<h1>${id ? 'Litigio ' + esc(x.referencia_cliente || '') : 'Nuevo litigio'}</h1>
+  <h2>Qué reclaman</h2>
+  <div class="rejilla">
+    <div><label>Referencia del cliente</label><input id="l-ref" value="${esc(x.referencia_cliente)}"></div>
+    <div><label>Fecha de apertura</label><input type="date" id="l-apertura" value="${n('fecha_apertura')}"></div>
+    <div><label>Cliente</label><select id="l-cliente">${opciones(S.clientes, x.cliente_id)}</select></div>
+    <div><label>Motivo</label><select id="l-motivo">${Object.entries(MOTIVOS_LIT).map(([k, t]) => `<option value="${k}" ${x.motivo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Fecha del servicio</label><input type="date" id="l-servicio" value="${n('fecha_servicio')}"></div>
+    <div><label>Albarán</label><input id="l-albaran" value="${esc(x.albaran)}"></div>
+    <div><label>Ruta</label><select id="l-ruta">${opciones(rutas, x.ruta_id, '—')}</select></div>
+    <div><label>Conductor</label><select id="l-conductor">${opciones(S.conductores, x.conductor_id, '—')}</select></div>
+    <div><label>Camión</label><select id="l-vehiculo">${opciones(camiones, x.vehiculo_id, '—', (v) => v.matricula)}</select></div>
+    <div><label>Remolque</label><select id="l-remolque">${opciones(remolques, x.remolque_id, '—', (v) => v.matricula)}</select></div>
+    <div><label>¿De quién es la culpa?</label><select id="l-resp">${Object.entries(RESP_INC).map(([k, t]) => `<option value="${k}" ${x.responsabilidad === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+  </div>
+  <label>Descripción</label><textarea id="l-desc" rows="3">${esc(x.descripcion)}</textarea>
+  <h2>Fase</h2>
+  <div class="rejilla">
+    <div><label>Fase actual</label><select id="l-estado">${Object.entries(FASES_LIT).map(([k, [, t]]) => `<option value="${k}" ${x.estado === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Fecha límite (para contestar, reclamar…)</label><input type="date" id="l-limite" value="${n('fecha_limite')}"></div>
+  </div>
+  <label>Próximo paso</label><input id="l-proxima" value="${esc(x.proxima_accion)}" placeholder="p. ej. mandar el registro de temperatura a Lactalis">
+  <h2>Lo que nos cobra el cliente</h2>
+  <div class="rejilla">
+    <div><label>Importe que reclaman €</label><input type="number" step="0.01" id="l-reclamado" value="${n('importe_reclamado')}"></div>
+    <div><label>Importe que nos han cobrado €</label><input type="number" step="0.01" id="l-cargado" value="${n('importe_cargado')}"></div>
+    <div><label>Cómo nos lo cobran</label><select id="l-forma"><option value="">—</option>${Object.entries(FORMA_CARGO).map(([k, t]) => `<option value="${k}" ${x.forma_cargo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Fecha del cargo</label><input type="date" id="l-fcargo" value="${n('fecha_cargo')}"></div>
+  </div>
+  <h2>Seguro</h2>
+  <div class="rejilla">
+    <div><label>Aseguradora</label><input id="l-aseg" value="${esc(x.aseguradora)}"></div>
+    <div><label>Nº de siniestro</label><input id="l-siniestro" value="${esc(x.num_siniestro)}"></div>
+    <div><label>Fecha del parte</label><input type="date" id="l-fparte" value="${n('fecha_parte_seguro')}"></div>
+    <div><label>Reclamado al seguro €</label><input type="number" step="0.01" id="l-recl-seg" value="${n('importe_reclamado_seguro')}"></div>
+    <div><label>Franquicia €</label><input type="number" step="0.01" id="l-franq" value="${n('franquicia')}"></div>
+    <div><label>Recuperado €</label><input type="number" step="0.01" id="l-recup" value="${n('importe_recuperado')}"></div>
+    <div><label>Fecha de cobro del seguro</label><input type="date" id="l-fcobro" value="${n('fecha_cobro_seguro')}"></div>
+  </div>
+  <label>Documentos (reclamación, CMR, temperaturas, parte del seguro…)</label>
+  <div id="l-lista-arch">${listaArchivos(editarLitigio.archivos, 'quitarArchivoLit')}</div>
+  <input type="file" id="l-archivos" multiple accept="application/pdf,image/*">
+  <label>Notas</label><textarea id="l-notas" rows="2">${esc(x.notas)}</textarea>
+  ${x.incidencia_id ? `<p class="ayuda">Viene de una incidencia: <a href="#incidencias" onclick="cerrarModal();setTimeout(()=>editarIncidencia('${x.incidencia_id}'),300)">ver incidencia</a></p>` : ''}
+  ${id ? `<h2>Historial</h2>
+  <div class="barra"><input id="l-nota-hist" placeholder="Añadir una anotación (llamada, correo, respuesta…)"><button class="sec" onclick="anotarLitigio('${id}')">Añadir</button></div>
+  <div class="tabla-wrap"><table>${hist.map((h) => `<tr><td>${new Date(h.fecha).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' })}</td>
+    <td>${et(...(FASES_LIT[h.estado] || ['gris', h.estado || '']))}</td><td>${esc(h.nota)}</td><td class="ayuda">${esc(h.usuario_nombre)}</td></tr>`).join('')}</table></div>` : ''}
+  <div class="acciones">${id ? `<button class="peligro izq" onclick="borrarLitigio('${id}')">Borrar</button>` : ''}
+    <button class="sec" onclick="cerrarModal()">Cancelar</button><button id="b-lit" onclick="guardarLitigio(${id ? `'${id}'` : ''})">Guardar</button></div>`);
+}
+function quitarArchivoLit(i) { editarLitigio.archivos.splice(i, 1); $('#l-lista-arch').innerHTML = listaArchivos(editarLitigio.archivos, 'quitarArchivoLit'); }
+async function guardarLitigio(id) {
+  if (!val('l-cliente')) return aviso('Elige el cliente', true);
+  if (!val('l-apertura')) return aviso('Pon la fecha de apertura', true);
+  $('#b-lit').disabled = true;
+  try {
+    const nuevos = await subirArchivos('l-archivos', 'litigios/' + val('l-apertura').slice(0, 7));
+    const imp = (k) => (val(k) == null ? null : leerNum(val(k)));
+    const reg = { referencia_cliente: val('l-ref'), fecha_apertura: val('l-apertura'), cliente_id: val('l-cliente'), motivo: val('l-motivo'),
+      fecha_servicio: val('l-servicio'), albaran: val('l-albaran'), ruta_id: val('l-ruta'), conductor_id: val('l-conductor'), vehiculo_id: val('l-vehiculo'),
+      remolque_id: val('l-remolque'), responsabilidad: val('l-resp'), descripcion: val('l-desc'), estado: val('l-estado'), fecha_limite: val('l-limite'),
+      proxima_accion: val('l-proxima'), importe_reclamado: imp('l-reclamado'), importe_cargado: imp('l-cargado'), forma_cargo: val('l-forma'),
+      fecha_cargo: val('l-fcargo'), aseguradora: val('l-aseg'), num_siniestro: val('l-siniestro'), fecha_parte_seguro: val('l-fparte'),
+      importe_reclamado_seguro: imp('l-recl-seg'), franquicia: imp('l-franq'), importe_recuperado: imp('l-recup'), fecha_cobro_seguro: val('l-fcobro'),
+      archivos: [...editarLitigio.archivos, ...nuevos], notas: val('l-notas') };
+    if (!id) { const b = editarLitigio.base || {}; if (b.incidencia_id) reg.incidencia_id = b.incidencia_id; if (b.viaje_id) reg.viaje_id = b.viaje_id; }
+    if ([reg.importe_reclamado, reg.importe_cargado, reg.importe_recuperado].some((v) => Number.isNaN(v))) { $('#b-lit').disabled = false; return aviso('Algún importe no es válido', true); }
+    if (id) await q(db().from('litigios').update(reg).eq('id', id)); else await q(db().from('litigios').insert(reg));
+    cerrarModal(); aviso('Litigio guardado'); if ((location.hash.slice(1) || '').startsWith('litigios')) pLitigios(); else location.hash = '#litigios';
+  } catch { const b = $('#b-lit'); if (b) b.disabled = false; }
+}
+async function anotarLitigio(id) {
+  const t = val('l-nota-hist'); if (!t) return;
+  const est = (await q(db().from('litigios').select('estado').eq('id', id).single())).estado;
+  await q(db().from('litigio_historial').insert({ litigio_id: id, estado: est, nota: t, usuario: S.usuario.id,
+    usuario_nombre: S.usuario.user_metadata?.nombre || S.usuario.email.split('@')[0] }));
+  aviso('Anotación añadida'); editarLitigio(id);
+}
+async function borrarLitigio(id) {
+  if (!confirm('¿Borrar este litigio y todo su historial?')) return;
+  await q(db().from('litigios').delete().eq('id', id)); cerrarModal(); aviso('Litigio borrado'); pLitigios();
+}
 
 /* ---------------------------------------------------------------- GESTORÍA */
 const fGest = { mes: mesAnterior().slice(0, 7) };
