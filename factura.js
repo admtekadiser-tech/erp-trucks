@@ -10,6 +10,7 @@ const AZUL_FACTURA = '#2c5aa0';
 const CSS_FACTURA = `
 .fx{font-family:'Inconsolata',Consolas,'Courier New',monospace;color:#555;width:210mm}
 .fx *{box-sizing:border-box}
+.fx table{min-width:0;background:none;box-shadow:none}.fx th,.fx td{text-transform:none;letter-spacing:normal;background:none;position:static;border:0;box-shadow:none;font-family:inherit}
 .fx-pg{position:relative;width:210mm;height:296mm;padding:0 9.5mm;background:#fff;overflow:hidden;break-after:page;page-break-after:always}
 .fx-pg:last-child{break-after:auto;page-break-after:auto}
 .fx-logo{text-align:center;padding-top:10mm;height:51mm}.fx-logo img{width:40mm;height:40mm;object-fit:contain}
